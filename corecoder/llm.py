@@ -49,9 +49,9 @@ class LLMResponse:
         return msg
 
 
-# pricing per million tokens: (input, output)
+# pricing per million tokens: (input, output, optional cache read, optional cache write)
 # sources: openai.com/api/pricing, api-docs.deepseek.com, platform.claude.com,
-#          platform.moonshot.ai, alibabacloud.com/help/en/model-studio
+#          platform.moonshot.ai, alibabacloud.com/help/en/model-studio, platform.minimax.io
 _PRICING = {
     # OpenAI - current flagships
     "gpt-5.5": (5, 30),
@@ -78,7 +78,31 @@ _PRICING = {
     "qwen-max": (0.78, 3.9),
     # Moonshot Kimi
     "kimi-k2.5": (0.6, 3),
+    # MiniMax
+    "MiniMax-M3": (0.6, 2.4, 0.12, None),
+    "MiniMax-M2.7": (0.3, 1.2, 0.06, 0.375),
 }
+
+
+def _pricing_key(model: str) -> str:
+    """Strip a LiteLLM provider prefix before looking up model pricing."""
+    return model.rsplit("/", 1)[-1]
+
+
+def _cost_for_usage(
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> float | None:
+    key = _pricing_key(model)
+    pricing = _PRICING.get(key)
+    if not pricing:
+        return None
+    input_rate, output_rate = pricing[:2]
+    return (
+        prompt_tokens * input_rate / 1_000_000
+        + completion_tokens * output_rate / 1_000_000
+    )
 
 
 class ScriptedLLM:
@@ -119,18 +143,29 @@ class LLM:
         self.extra = kwargs  # temperature, max_tokens, etc.
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
+        self._estimated_cost = _cost_for_usage(model, 0, 0)
 
     @property
     def estimated_cost(self) -> float | None:
         """Rough cost estimate in USD. Returns None if model not in pricing table."""
-        pricing = _PRICING.get(self.model)
-        if not pricing:
-            return None
-        input_rate, output_rate = pricing
-        return (
-            self.total_prompt_tokens * input_rate / 1_000_000
-            + self.total_completion_tokens * output_rate / 1_000_000
+        if "_estimated_cost" in self.__dict__:
+            return self._estimated_cost
+        return _cost_for_usage(
+            self.model,
+            self.total_prompt_tokens,
+            self.total_completion_tokens,
         )
+
+    def _record_usage(self, prompt_tokens: int, completion_tokens: int):
+        self.total_prompt_tokens += prompt_tokens
+        self.total_completion_tokens += completion_tokens
+        request_cost = _cost_for_usage(
+            self.model,
+            prompt_tokens,
+            completion_tokens,
+        )
+        if request_cost is not None:
+            self._estimated_cost = (self._estimated_cost or 0.0) + request_cost
 
     def chat(
         self,
@@ -205,8 +240,7 @@ class LLM:
                 args = {}
             parsed.append(ToolCall(id=raw["id"], name=raw["name"], arguments=args))
 
-        self.total_prompt_tokens += prompt_tok
-        self.total_completion_tokens += completion_tok
+        self._record_usage(prompt_tok, completion_tok)
 
         return LLMResponse(
             content="".join(content_parts),
@@ -261,6 +295,7 @@ class LiteLLM(LLM):
         self.extra = kwargs
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
+        self._estimated_cost = _cost_for_usage(model, 0, 0)
 
     def chat(
         self,
@@ -325,8 +360,7 @@ class LiteLLM(LLM):
                 args = {}
             parsed.append(ToolCall(id=raw["id"], name=raw["name"], arguments=args))
 
-        self.total_prompt_tokens += prompt_tok
-        self.total_completion_tokens += completion_tok
+        self._record_usage(prompt_tok, completion_tok)
 
         return LLMResponse(
             content="".join(content_parts),

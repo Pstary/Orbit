@@ -150,6 +150,41 @@ def test_cost_estimation_unknown_model():
     assert llm.estimated_cost is None
 
 
+def test_minimax_pricing_registry_preserves_official_rates():
+    from corecoder.llm import _PRICING
+
+    assert _PRICING["MiniMax-M3"] == (0.6, 2.4, 0.12, None)
+    assert _PRICING["MiniMax-M2.7"] == (0.3, 1.2, 0.06, 0.375)
+
+
+def test_minimax_m3_cost_estimation_uses_flat_pricing():
+    from corecoder.llm import LLM
+
+    for model in ("MiniMax-M3", "anthropic/MiniMax-M3"):
+        llm = LLM.__new__(LLM)
+        llm.model = model
+        llm.total_prompt_tokens = 500_000
+        llm.total_completion_tokens = 100_000
+        assert llm.estimated_cost == 0.54
+
+
+def test_minimax_m3_cost_tracks_each_request_separately():
+    from corecoder.llm import LLM
+
+    llm = LLM.__new__(LLM)
+    llm.model = "MiniMax-M3"
+    llm.extra = {}
+    llm.total_prompt_tokens = 0
+    llm.total_completion_tokens = 0
+    llm._estimated_cost = 0.0
+
+    llm._record_usage(400_000, 100_000)
+    llm._record_usage(400_000, 100_000)
+
+    assert llm.total_prompt_tokens == 800_000
+    assert llm.estimated_cost == 0.96
+
+
 # --- Changed files tracking ---
 
 def test_edit_tracks_changed_files(tmp_path):
