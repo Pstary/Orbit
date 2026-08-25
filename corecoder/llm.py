@@ -13,7 +13,7 @@ import json
 import time
 from dataclasses import dataclass, field
 
-from openai import OpenAI, APIError, BadRequestError, RateLimitError, APITimeoutError, APIConnectionError
+from openai import APIConnectionError, APIError, APITimeoutError, BadRequestError, OpenAI, RateLimitError
 
 
 @dataclass

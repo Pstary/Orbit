@@ -11,12 +11,13 @@ which means it's done working and ready to report back.
 
 import concurrent.futures
 import inspect
-from .llm import LLM
-from .tools import ALL_TOOLS
-from .tools.base import Tool
-from .tools.agent import AgentTool
-from .prompt import system_prompt
+
 from .context import ContextManager
+from .llm import LLM
+from .prompt import system_prompt
+from .tools import ALL_TOOLS
+from .tools.agent import AgentTool
+from .tools.base import Tool
 
 
 class Agent:
@@ -109,9 +110,10 @@ class Agent:
             inspect.signature(tool.execute).bind(**tc.arguments)
         except TypeError as e:
             return f"Error: bad arguments for {tc.name}: {e}"
+        # a tool that blows up gets reported back as text, never kills the loop
         try:
             return tool.execute(**tc.arguments)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return f"Error executing {tc.name}: {e}"
 
     def _exec_tools_parallel(self, tool_calls, on_tool=None) -> list[str]:

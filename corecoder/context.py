@@ -13,6 +13,7 @@ CoreCoder implements the same idea in 3 layers:
 """
 
 from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -48,16 +49,14 @@ class ContextManager:
         compressed = False
 
         # Layer 1: snip verbose tool outputs
-        if current > self._snip_at:
-            if self._snip_tool_outputs(messages):
-                compressed = True
-                current = estimate_tokens(messages)
+        if current > self._snip_at and self._snip_tool_outputs(messages):
+            compressed = True
+            current = estimate_tokens(messages)
 
         # Layer 2: LLM-powered summarization of old turns
-        if current > self._summarize_at and len(messages) > 10:
-            if self._summarize_old(messages, llm, keep_recent=8):
-                compressed = True
-                current = estimate_tokens(messages)
+        if current > self._summarize_at and len(messages) > 10 and self._summarize_old(messages, llm, keep_recent=8):
+            compressed = True
+            current = estimate_tokens(messages)
 
         # Layer 3: hard collapse - last resort
         if current > self._collapse_at and len(messages) > 4:
@@ -169,7 +168,8 @@ class ContextManager:
                     ],
                 )
                 return resp.content
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
+                # summarization is best-effort; fall back to extraction below
                 pass
 
         # fallback: extract key lines

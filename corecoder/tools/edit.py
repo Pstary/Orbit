@@ -8,6 +8,7 @@ and makes edits safe and reviewable.
 
 import difflib
 from pathlib import Path
+from typing import ClassVar
 
 from .base import Tool
 
@@ -22,7 +23,7 @@ class EditFileTool(Tool):
         "old_string must appear exactly once in the file for safety. "
         "Include enough surrounding context to ensure uniqueness."
     )
-    parameters = {
+    parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "file_path": {
@@ -72,7 +73,8 @@ class EditFileTool(Tool):
             # generate a unified diff so the user/LLM can see exactly what changed
             diff = _unified_diff(content, new_content, str(p))
             return f"Edited {file_path}\n{diff}"
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
+            # boundary: the agent gets an error string, not a traceback
             return f"Error: {e}"
 
 

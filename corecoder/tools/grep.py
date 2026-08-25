@@ -2,6 +2,8 @@
 
 import re
 from pathlib import Path
+from typing import ClassVar
+
 from .base import Tool
 
 # skip these dirs to avoid noise
@@ -14,7 +16,7 @@ class GrepTool(Tool):
         "Search file contents with regex. "
         "Returns matching lines with file path and line number."
     )
-    parameters = {
+    parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "pattern": {

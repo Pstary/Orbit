@@ -5,9 +5,8 @@ from unittest import mock
 
 import pytest
 
-from corecoder.llm import LLM, LiteLLM, LLMResponse
 from corecoder.config import Config
-
+from corecoder.llm import LLM, LiteLLM, LLMResponse
 
 # ---------------------------------------------------------------------------
 # Fake streaming response (matches OpenAI stream chunk format)

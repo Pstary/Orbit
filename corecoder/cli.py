@@ -1,21 +1,21 @@
 """Interactive REPL - the user-facing terminal interface."""
 
-import sys
-import os
 import argparse
+import os
+import sys
 
-from rich.console import Console
-from rich.markdown import Markdown
-from rich.panel import Panel
 from prompt_toolkit import prompt as pt_prompt
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
 
-from .agent import Agent
-from .llm import LLM, LiteLLM
-from .config import Config
-from .session import save_session, load_session, list_sessions
 from . import __version__
+from .agent import Agent
+from .config import Config
+from .llm import LLM, LiteLLM
+from .session import list_sessions, load_session, save_session
 
 console = Console()
 
@@ -114,7 +114,8 @@ def _run_once(agent: Agent, prompt: str):
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")
         sys.exit(130)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
+        # one-shot mode: print whatever went wrong and exit non-zero
         console.print(f"\n[red]Error: {e}[/red]")
         sys.exit(1)
     print()
@@ -229,7 +230,7 @@ def _repl(agent: Agent, config: Config):
         # call the agent
         streamed: list[str] = []
 
-        def on_token(tok):
+        def on_token(tok, streamed=streamed):
             streamed.append(tok)
             print(tok, end="", flush=True)
 
@@ -245,7 +246,8 @@ def _repl(agent: Agent, config: Config):
                 console.print(Markdown(response))
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted.[/yellow]")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
+            # keep the REPL alive no matter what chat() throws
             console.print(f"\n[red]Error: {e}[/red]")
 
 

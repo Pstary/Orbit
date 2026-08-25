@@ -176,8 +176,8 @@ def test_read_write_unicode_roundtrip(tmp_path):
     path = tmp_path / "zh.txt"
     write.execute(file_path=str(path), content="第一行\n第二行\n")
     raw = path.read_bytes()
-    assert "第一行".encode("utf-8") in raw  # genuinely UTF-8 on disk, not cp936
-    assert "第二行".encode("utf-8") in raw
+    assert "第一行".encode() in raw  # genuinely UTF-8 on disk, not cp936
+    assert "第二行".encode() in raw
     assert path.read_text(encoding="utf-8").splitlines() == ["第一行", "第二行"]
     r = read.execute(file_path=str(path))
     assert "第一行" in r and "第二行" in r
