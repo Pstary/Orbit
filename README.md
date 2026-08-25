@@ -69,6 +69,7 @@ Give it a model and a key and it goes. It speaks the OpenAI-compatible API by de
 |---|---|
 | OpenAI (default `gpt-5.5`) | `OPENAI_API_KEY=sk-...` |
 | DeepSeek | `OPENAI_API_KEY=sk-... OPENAI_BASE_URL=https://api.deepseek.com CORECODER_MODEL=deepseek-chat` |
+| OmniRoute | `OPENAI_API_KEY=your-key OPENAI_BASE_URL=http://localhost:20128/v1 CORECODER_MODEL=auto` |
 | MiniMax (global, OpenAI) | `OPENAI_API_KEY=sk-... OPENAI_BASE_URL=https://api.minimax.io/v1 CORECODER_MODEL=MiniMax-M3 CORECODER_MAX_CONTEXT=1000000` |
 | MiniMax (China, OpenAI) | `OPENAI_API_KEY=sk-... OPENAI_BASE_URL=https://api.minimaxi.com/v1 CORECODER_MODEL=MiniMax-M3 CORECODER_MAX_CONTEXT=1000000` |
 | MiniMax (global, Anthropic via LiteLLM) | `CORECODER_API_KEY=sk-... CORECODER_BASE_URL=https://api.minimax.io/anthropic CORECODER_MODEL=anthropic/MiniMax-M3 CORECODER_MAX_CONTEXT=1000000 CORECODER_PROVIDER=litellm` |
