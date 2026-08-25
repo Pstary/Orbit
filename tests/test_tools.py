@@ -284,6 +284,18 @@ def test_grep_searches_under_skip_named_ancestor(tmp_path):
     assert "needle" in r
 
 
+def test_grep_reports_truncated_file_scan(monkeypatch, tmp_path):
+    """A truncated file scan must be reported as an incomplete result."""
+    grep = get_tool("grep")
+    def fake_walk(root, include):
+        return [], True
+    monkeypatch.setattr(type(grep), "_walk", staticmethod(fake_walk))
+    r = grep.execute(pattern="needle", path=str(tmp_path))
+    assert "No matches found in scanned files." in r
+    assert "5000 file scan limit reached" in r
+    assert "results may be incomplete" in r
+
+
 def test_grep_skips_junk_dirs_inside_root(tmp_path):
     """Junk dirs *inside* the search root are still skipped."""
     (tmp_path / "node_modules").mkdir()

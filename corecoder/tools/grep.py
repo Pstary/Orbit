@@ -45,9 +45,11 @@ class GrepTool(Tool):
 
         if base.is_file():
             files = [base]
+            scan_truncated = False
         else:
-            files = self._walk(base, include)
+            files, scan_truncated = self._walk(base, include)
 
+        scan_limit_msg = "... (5000 file scan limit reached; results may be incomplete)"
         matches = []
         for fp in files:
             try:
@@ -59,14 +61,23 @@ class GrepTool(Tool):
                     matches.append(f"{fp}:{lineno}: {line.rstrip()}")
                     if len(matches) >= 200:
                         matches.append("... (200 match limit reached)")
+                        if scan_truncated:
+                            matches.append(scan_limit_msg)
                         return "\n".join(matches)
 
-        return "\n".join(matches) if matches else "No matches found."
+        if matches:
+            if scan_truncated:
+                matches.append(scan_limit_msg)
+            return "\n".join(matches)
+        if scan_truncated:
+            return f"No matches found in scanned files.\n{scan_limit_msg}"
+        return "No matches found."
 
     @staticmethod
-    def _walk(root: Path, include: str | None) -> list[Path]:
+    def _walk(root: Path, include: str | None) -> tuple[list[Path], bool]:
         """Walk dir tree, skipping junk dirs."""
         results = []
+        truncated = False
         for item in root.rglob(include or "*"):
             # skip junk dirs *inside* the search root - matching item.parts would
             # also catch an ancestor named e.g. "build" and hide the whole tree
@@ -75,5 +86,6 @@ class GrepTool(Tool):
             if item.is_file():
                 results.append(item)
             if len(results) >= 5000:
+                truncated = True
                 break
-        return results
+        return results, truncated
