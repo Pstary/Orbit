@@ -7,7 +7,7 @@ from orbit.tools import ALL_TOOLS, get_tool
 
 
 def test_tool_count():
-    assert len(ALL_TOOLS) == 7
+    assert len(ALL_TOOLS) == 8
 
 
 def test_all_tools_have_valid_schema():

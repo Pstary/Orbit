@@ -18,7 +18,7 @@ def test_public_api_exports():
     assert Agent is not None
     assert LLM is not None
     assert Config is not None
-    assert len(ALL_TOOLS) == 7
+    assert len(ALL_TOOLS) == 8
 
 
 def test_config_from_env(monkeypatch):
@@ -46,6 +46,66 @@ def test_estimate_tokens():
     t = estimate_tokens(msgs)
     assert t > 0
     assert t < 100
+
+
+def test_estimate_tokens_uses_tokenizer(monkeypatch):
+    import orbit.context as context_module
+
+    class _Tokenizer:
+        def encode(self, text):
+            return text.split("|")
+
+    context_module._get_tokenizer.cache_clear()
+    monkeypatch.setattr(context_module, "_get_tokenizer", lambda: _Tokenizer())
+
+    messages = [{"role": "user", "content": "a|b|c"}]
+
+    assert estimate_tokens(messages) == 3
+
+
+def test_estimate_tokens_preserves_original_field_scope(monkeypatch):
+    import orbit.context as context_module
+
+    class _Tokenizer:
+        def encode(self, text):
+            return text.split("|")
+
+    context_module._get_tokenizer.cache_clear()
+    monkeypatch.setattr(context_module, "_get_tokenizer", lambda: _Tokenizer())
+
+    messages = [
+        {
+            "role": "user",
+            "content": "a|b",
+            "tool_calls": [{"id": "1", "function": {"name": "x", "arguments": {"v": "c|d"}}}],
+            "tool_call_id": "ignored|field",
+        }
+    ]
+
+    assert estimate_tokens(messages) == 4
+
+
+def test_default_tokenizer_model_is_gpt_4o(monkeypatch):
+    import orbit.context as context_module
+
+    seen = {}
+
+    class _Tokenizer:
+        def encode(self, text):
+            return text.split()
+
+    class _FakeTiktoken:
+        @staticmethod
+        def encoding_for_model(model):
+            seen["model"] = model
+            return _Tokenizer()
+
+    context_module._get_tokenizer.cache_clear()
+    monkeypatch.setitem(__import__("sys").modules, "tiktoken", _FakeTiktoken)
+
+    assert context_module._get_tokenizer() is not None
+    assert seen["model"] == "gpt-4o"
+    context_module._get_tokenizer.cache_clear()
 
 
 def test_context_snip():

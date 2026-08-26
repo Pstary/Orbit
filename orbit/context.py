@@ -17,13 +17,43 @@ Orbit implements the same idea in 3 layers:
 
 from __future__ import annotations
 
+import json
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .llm import LLM
 
-# 用字符数粗略估算token数。这里假设中英文混合内容大约 3 个字符约等于 1 个token。它不是精确tokenizer，只是便宜快速的估算。
-def _approx_tokens(text: str) -> int:
+DEFAULT_TOKENIZER_MODEL = "gpt-4o"
+
+@lru_cache(maxsize=1)
+def _get_tokenizer():
+    """Return the default local tokenizer when available."""
+    try:
+        import tiktoken
+    except ImportError:
+        return None
+
+    try:
+        return tiktoken.encoding_for_model(DEFAULT_TOKENIZER_MODEL)
+    except KeyError:
+        try:
+            return tiktoken.get_encoding("cl100k_base")
+        except Exception:  # noqa: BLE001
+            return None
+
+
+def count_text_tokens(text: str) -> int:
+    """Count text tokens with a tokenizer, falling back only when unavailable."""
+    if not text:
+        return 0
+    tokenizer = _get_tokenizer()
+    if tokenizer is not None:
+        return len(tokenizer.encode(text))
+    return _fallback_token_count(text)
+
+
+def _fallback_token_count(text: str) -> int:
     """Rough token count, roughly 3 chars per token for mixed en/zh content."""
     return len(text) // 3
 
@@ -32,9 +62,9 @@ def estimate_tokens(messages: list[dict]) -> int:
     total = 0
     for m in messages:
         if m.get("content"):
-            total += _approx_tokens(m["content"])
+            total += count_text_tokens(str(m["content"]))
         if m.get("tool_calls"):
-            total += _approx_tokens(str(m["tool_calls"]))
+            total += count_text_tokens(json.dumps(m["tool_calls"], ensure_ascii=False, sort_keys=True))
     return total
 
 

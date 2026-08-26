@@ -97,7 +97,7 @@ ALL_TOOLS = [
 ]
 ```
 
-跑起来，问它「抓一下 https://raw.githubusercontent.com/he-yufeng/Orbit/main/README.md 看看这项目干嘛的」，它会调 `fetch_url` 再讲给你听。
+跑起来，问它「抓一下 [https://raw.githubusercontent.com/he-yufeng/corecoder/main/README.md](https://raw.githubusercontent.com/he-yufeng/Orbit/main/README.md) 看看这项目干嘛的」，它会调 `fetch_url` 再讲给你听。
 
 这个小工具里其实把前几篇的几条经验都用上了。截断留头尾，是第二篇和第四篇反复出现的套路。`errors="replace"` 解码、用一个大 try-except 把任何异常都变成一句人话返回，也是前面一路见过的那套「坏数据不甩锅给用户」。还有第五篇那条最该上心的：你的工具扛不扛得住被并发调用？这个 `fetch_url` 扛得住，因为它压根没有共享可变状态，每次调用自带 URL、自吐结果，两个线程同时跑它互不干扰。这不是运气，是设计。能做成无状态的工具，就别给它加状态，这是让你的工具默认就并发安全的最省力办法。
 

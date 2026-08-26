@@ -7,6 +7,7 @@ from .glob_tool import GlobTool
 from .grep import GrepTool
 from .read import ReadFileTool
 from .write import WriteFileTool
+from .fetch import FetchUrlTool
 
 ALL_TOOLS = [
     BashTool(),
@@ -16,6 +17,7 @@ ALL_TOOLS = [
     GlobTool(),
     GrepTool(),
     AgentTool(),
+    FetchUrlTool(),
 ]
 
 

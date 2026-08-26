@@ -16,5 +16,6 @@ venv/
 .pytest_cache/
 .tmp/
 orbit/trace/
+orbit/evals/runs/
 tests/logs/
 assets/
