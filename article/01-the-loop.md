@@ -2,7 +2,7 @@
 
 如果只能用一句话解释编码 agent，我会这么说：它是一个循环，反复地问模型「下一步干什么」，照着模型说的去动手，把结果再讲给模型听，直到模型说「不用动手了，我有答案了」。
 
-听起来朴素到有点失望。但这就是真相。Claude Code 把这件事做到了几十万行，可那个最中心的东西，公开拆解里叫 `query.ts`，它的主体是一个一千七百行上下的 `while` 循环。CoreCoder 把同一个循环写在 `corecoder/agent.py` 里，连空行带注释一共 150 行。两者形状一模一样，区别只是后者你能一眼看完。
+听起来朴素到有点失望。但这就是真相。Claude Code 把这件事做到了几十万行，可那个最中心的东西，公开拆解里叫 `query.ts`，它的主体是一个一千七百行上下的 `while` 循环。Orbit 把同一个循环写在 `orbit/agent.py` 里，连空行带注释一共 150 行。两者形状一模一样，区别只是后者你能一眼看完。
 
 这一篇，我们就把这个循环逐段读透。
 
@@ -46,7 +46,7 @@ def chat(self, user_input: str, on_token=None, on_tool=None) -> str:
 
 ## 为什么是 for，不是 while(true)
 
-Claude Code 的循环写成 `while(true)`，靠内部的预算和错误恢复来退出。CoreCoder 这里写成 `for _ in range(self.max_rounds)`，`max_rounds` 默认 50。
+Claude Code 的循环写成 `while(true)`，靠内部的预算和错误恢复来退出。Orbit 这里写成 `for _ in range(self.max_rounds)`，`max_rounds` 默认 50。
 
 这不是风格差异，是一道刹车。设想模型陷入一个它自己跳不出的循环：读文件、发现不对、再读、还是不对、再读。没有上限的话，它会一直烧你的 token，直到你手动 Ctrl+C 或者账单让你心疼。50 轮这个数字是经验值，正常任务远用不到，真撞到上限，循环会返回那句很克制的 `(reached maximum tool-call rounds)`，把控制权交还给你。
 
@@ -54,7 +54,7 @@ Claude Code 的循环写成 `while(true)`，靠内部的预算和错误恢复来
 
 ## 工具结果长什么样
 
-模型要工具，我们就得把执行结果以它认得的格式喂回去。OpenAI 的 function calling 协议规定，一个 `assistant` 消息如果带了 `tool_calls`，那么后面必须跟上数量相等、`tool_call_id` 一一对应的 `tool` 消息。CoreCoder 老老实实照办：
+模型要工具，我们就得把执行结果以它认得的格式喂回去。OpenAI 的 function calling 协议规定，一个 `assistant` 消息如果带了 `tool_calls`，那么后面必须跟上数量相等、`tool_call_id` 一一对应的 `tool` 消息。Orbit 老老实实照办：
 
 ```python
 result = self._exec_tool(tc)
@@ -108,7 +108,7 @@ self._tool_by_name = {t.name: t for t in self.tools}
 
 真实使用里，用户随时会按 Ctrl+C。麻烦在于，Ctrl+C 可能正好打在「模型已经返回了一批工具调用、但工具还没全部跑完」的中间。这时候对话历史里有一条带 `tool_calls` 的 assistant 消息，却缺了部分对应的 `tool` 回复。下一次请求带着这段残缺历史发出去，OpenAI 兼容的 API 会直接拒绝，因为它违反了「每个 tool_call 必须有配对回复」的协议。一次中断，就把整个会话搞脏了。
 
-CoreCoder 的处理是在循环里专门接住这个异常：
+Orbit 的处理是在循环里专门接住这个异常：
 
 ```python
 except KeyboardInterrupt:
@@ -138,9 +138,9 @@ def _answer_pending_tool_calls(self, tool_calls):
 
 ## 和 Claude Code 的对照
 
-把 CoreCoder 这 150 行和 Claude Code 的 `query.ts` 摆在一起，你会发现循环的骨架几乎重合：拼消息、带工具调模型、模型要工具就执行、结果回填、再循环、模型给文本就结束。这套结构不是 CoreCoder 抄来的，是这一代编码 agent 的共同范式，谁来写都长这样。
+把 Orbit 这 150 行和 Claude Code 的 `query.ts` 摆在一起，你会发现循环的骨架几乎重合：拼消息、带工具调模型、模型要工具就执行、结果回填、再循环、模型给文本就结束。这套结构不是 Orbit 抄来的，是这一代编码 agent 的共同范式，谁来写都长这样。
 
-真正的差距在循环之外那一圈防护。Claude Code 的循环里裹着一层厚得多的错误恢复：限流了退避重试、上下文超了自动压缩再重试、服务端 529 了切换备用模型、输出被截断了重试若干次、还有更细的预算控制（既数轮次也数美元）。CoreCoder 把这些拆开放在了别处：重试在 [`llm.py`](03-llm-and-cost.md) 里，压缩在 [`context.py`](04-context.md) 里，预算就是这里的 `max_rounds`。形状相同，厚度不同。本系列接下来几篇，基本就是逐个补上这圈防护，看每一层在 Claude Code 里是什么、在 CoreCoder 里被压成了几十行的什么。
+真正的差距在循环之外那一圈防护。Claude Code 的循环里裹着一层厚得多的错误恢复：限流了退避重试、上下文超了自动压缩再重试、服务端 529 了切换备用模型、输出被截断了重试若干次、还有更细的预算控制（既数轮次也数美元）。Orbit 把这些拆开放在了别处：重试在 [`llm.py`](03-llm-and-cost.md) 里，压缩在 [`context.py`](04-context.md) 里，预算就是这里的 `max_rounds`。形状相同，厚度不同。本系列接下来几篇，基本就是逐个补上这圈防护，看每一层在 Claude Code 里是什么、在 Orbit 里被压成了几十行的什么。
 
 ## 收个尾
 

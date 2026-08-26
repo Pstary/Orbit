@@ -1,4 +1,4 @@
-"""Structured execution tracing for CoreCoder."""
+"""Structured execution tracing for Orbit."""
 
 from __future__ import annotations
 

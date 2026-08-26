@@ -15,7 +15,7 @@ from rich.panel import Panel
 from . import __version__
 from .agent import Agent
 from .config import Config, ConfigError, parse_config
-from .harness import CoreCoderHarness, HarnessConfig, PermissionMode
+from .harness import OrbitHarness, HarnessConfig, PermissionMode
 from .llm import LLM, LiteLLM
 from .session import list_sessions, load_session, save_session
 
@@ -24,10 +24,10 @@ console = Console()
 
 def _parse_args():
     p = argparse.ArgumentParser(
-        prog="corecoder",
+        prog="orbit",
         description="Minimal AI coding agent. Works with any OpenAI-compatible LLM.",
     )
-    p.add_argument("-m", "--model", help="Model name (default: $CORECODER_MODEL or gpt-5.5)")
+    p.add_argument("-m", "--model", help="Model name (default: $ORBIT_MODEL or gpt-5.5)")
     p.add_argument("--base-url", help="API base URL (default: $OPENAI_BASE_URL)")
     p.add_argument("--api-key", help="API key (default: $OPENAI_API_KEY)")
     p.add_argument("-p", "--prompt", help="One-shot prompt (non-interactive mode)")
@@ -85,7 +85,7 @@ def main():
     if not config.api_key:
         console.print("[red bold]No API key found.[/]")
         console.print(
-            "Set one of: OPENAI_API_KEY, DEEPSEEK_API_KEY, or CORECODER_API_KEY\n"
+            "Set one of: OPENAI_API_KEY, DEEPSEEK_API_KEY, or ORBIT_API_KEY\n"
             "\nExamples:\n"
             "  # OpenAI\n"
             "  export OPENAI_API_KEY=sk-...\n"
@@ -94,7 +94,7 @@ def main():
             "  export OPENAI_API_KEY=sk-... OPENAI_BASE_URL=https://api.deepseek.com\n"
             "\n"
             "  # Ollama (local)\n"
-            "  export OPENAI_API_KEY=ollama OPENAI_BASE_URL=http://localhost:11434/v1 CORECODER_MODEL=qwen2.5-coder\n"
+            "  export OPENAI_API_KEY=ollama OPENAI_BASE_URL=http://localhost:11434/v1 ORBIT_MODEL=qwen2.5-coder\n"
         )
         sys.exit(1)
 
@@ -148,7 +148,7 @@ def main():
         console.print(f"[dim]Trace saved: {trace_path}[/dim]")
 
 
-def _build_harness(config: Config) -> CoreCoderHarness:
+def _build_harness(config: Config) -> OrbitHarness:
     permission_mode = PermissionMode(config.permission_mode)
     workspace_root = Path(config.workspace_root).expanduser() if config.workspace_root else Path.cwd()
     trace_dir = Path(config.trace_dir).expanduser() if config.trace_dir else None
@@ -161,7 +161,7 @@ def _build_harness(config: Config) -> CoreCoderHarness:
         reply = input("Approve? [y/N] ").strip().lower()
         return reply in {"y", "yes"}
 
-    return CoreCoderHarness(
+    return OrbitHarness(
         HarnessConfig(
             workspace_root=workspace_root,
             trace_dir=trace_dir,
@@ -175,7 +175,7 @@ def _build_harness(config: Config) -> CoreCoderHarness:
         approval_callback=approve,
     )
 
-# _run_once() 是CoreCoder的非交互执行入口，负责跑一次用户prompt、实时打印模型输出、展示工具调用，并把中断或异常转换成清晰的终端退出行为。
+# _run_once() 是Orbit的非交互执行入口，负责跑一次用户prompt、实时打印模型输出、展示工具调用，并把中断或异常转换成清晰的终端退出行为。
 def _run_once(agent: Agent, prompt: str):
     """Non-interactive: run one prompt and exit."""
     def on_token(tok):
@@ -199,14 +199,14 @@ def _run_once(agent: Agent, prompt: str):
 def _repl(agent: Agent, config: Config):
     """Interactive read-eval-print loop."""
     console.print(Panel(
-        f"[bold]CoreCoder[/bold] v{__version__}\n"
+        f"[bold]Orbit[/bold] v{__version__}\n"
         f"Model: [cyan]{config.model}[/cyan]"
         + (f"  Base: [dim]{config.base_url}[/dim]" if config.base_url else "")
         + "\nType [bold]/help[/bold] for commands, [bold]Ctrl+C[/bold] to cancel, [bold]quit[/bold] to exit.",
         border_style="blue",
     ))
     # 给交互式命令行配置输入历史记录文件，把 ~ 展开成当前用户的home目录。
-    hist_path = os.path.expanduser("~/.corecoder_history")
+    hist_path = os.path.expanduser("~/.orbit_history")
     """
     # 创建一个 prompt_toolkit 的历史记录对象。后面传给输入框：
     ```
@@ -216,7 +216,7 @@ def _repl(agent: Agent, config: Config):
         ...
     )
     ```
-    这样你在CoreCoder交互式REPL里输入过的命令会被保存下来，下次可以用方向键上下翻历史输入。
+    这样你在Orbit交互式REPL里输入过的命令会被保存下来，下次可以用方向键上下翻历史输入。
     """
     history = FileHistory(hist_path)
 
@@ -302,11 +302,11 @@ def _repl(agent: Agent, config: Config):
             else:
                 console.print(f"[dim]Nothing to compress ({before} tokens, {len(agent.messages)} messages)[/dim]")
             continue
-        # 保存当前会话，后续可以通过corecoder-r恢复。
+        # 保存当前会话，后续可以通过orbit-r恢复。
         if user_input == "/save":
             sid = save_session(agent.messages, config.model)
             console.print(f"[green]Session saved: {sid}[/green]")
-            console.print(f"Resume with: corecoder -r {sid}")
+            console.print(f"Resume with: orbit -r {sid}")
             continue
         # 展示本次会话通过edit_file/write_file记录到的变更文件。
         if user_input == "/diff":
@@ -380,12 +380,12 @@ def _show_help():
         "  /diff          Show files modified this session\n"
         "  /save          Save session to disk\n"
         "  /sessions      List saved sessions\n"
-        "  quit           Exit CoreCoder\n"
+        "  quit           Exit Orbit\n"
         "\n"
         "[bold]Input:[/bold]\n"
         "  Enter          Submit message\n"
         "  Esc+Enter      Insert newline (for pasting code)",
-        title="CoreCoder Help",
+        title="Orbit Help",
         border_style="dim",
     ))
 

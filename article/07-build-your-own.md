@@ -1,6 +1,6 @@
-# Fork CoreCoder，搭一个你自己的 coding agent
+# Fork Orbit，搭一个你自己的 coding agent
 
-前六篇我们把 CoreCoder 拆开看了个遍。循环、工具、模型接口、上下文压缩、并发、子 agent、CLI，每个零件都摊在桌上看过了。这一篇我们把它们装回去，而且装成你自己的。
+前六篇我们把 Orbit 拆开看了个遍。循环、工具、模型接口、上下文压缩、并发、子 agent、CLI，每个零件都摊在桌上看过了。这一篇我们把它们装回去，而且装成你自己的。
 
 读懂和做出来之间，隔着一次动手。这篇就是带你跨过去。读完，你手上会有一个能跑、接着你常用的模型、带着一个你亲手加的工具、按你的脾气调教过的 coding agent。
 
@@ -9,9 +9,9 @@
 先确认起点是好的。
 
 ```bash
-# 在 GitHub 上 fork he-yufeng/CoreCoder 到你自己名下，然后
-git clone https://github.com/<你的用户名>/CoreCoder
-cd CoreCoder
+# 在 GitHub 上 fork he-yufeng/Orbit 到你自己名下，然后
+git clone https://github.com/<你的用户名>/Orbit
+cd Orbit
 pip install -e .
 python -m pytest tests/ -q
 ```
@@ -20,7 +20,7 @@ python -m pytest tests/ -q
 
 ## 第一步：接上你自己的模型
 
-CoreCoder 默认 `gpt-5.5`，但你未必想用它。第三篇讲过，换模型就是换环境变量。开发期我强烈建议先用本地的 Ollama，一分钱不花，随便折腾：
+Orbit 默认 `gpt-5.5`，但你未必想用它。第三篇讲过，换模型就是换环境变量。开发期我强烈建议先用本地的 Ollama，一分钱不花，随便折腾：
 
 ```bash
 # 装个 Ollama，拉一个 coder 模型
@@ -28,9 +28,9 @@ ollama pull qwen2.5-coder
 
 export OPENAI_API_KEY=ollama
 export OPENAI_BASE_URL=http://localhost:11434/v1
-export CORECODER_MODEL=qwen2.5-coder
+export ORBIT_MODEL=qwen2.5-coder
 
-corecoder
+orbit
 ```
 
 本地模型能力比旗舰差一截，但用来验证「我的改动有没有把流程跑通」绰绰有余，还省得你调试一个工具就烧一次 API 的钱。等逻辑都对了，再把环境变量换成 DeepSeek 或者别的，看真实效果。
@@ -39,7 +39,7 @@ corecoder
 
 第二篇我们加过一个查时间的 `now`，太小儿科。这次加个有用的：让 agent 能抓取一个网页或者 API 的文本内容。有了它，你的 agent 就能去读在线文档、查一个接口返回了什么，能力一下子打开了。
 
-新建 `corecoder/tools/fetch.py`：
+新建 `orbit/tools/fetch.py`：
 
 ```python
 """A read-only tool that fetches the text content of a URL."""
@@ -73,7 +73,7 @@ class FetchUrlTool(Tool):
         if not url.startswith(("http://", "https://")):
             return "Error: only http and https URLs are supported"
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "CoreCoder"})
+            req = urllib.request.Request(url, headers={"User-Agent": "Orbit"})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read(1_000_000)  # 顶多读 1MB，别让一个巨页撑爆内存
                 text = raw.decode("utf-8", errors="replace")
@@ -97,7 +97,7 @@ ALL_TOOLS = [
 ]
 ```
 
-跑起来，问它「抓一下 https://raw.githubusercontent.com/he-yufeng/CoreCoder/main/README.md 看看这项目干嘛的」，它会调 `fetch_url` 再讲给你听。
+跑起来，问它「抓一下 https://raw.githubusercontent.com/he-yufeng/Orbit/main/README.md 看看这项目干嘛的」，它会调 `fetch_url` 再讲给你听。
 
 这个小工具里其实把前几篇的几条经验都用上了。截断留头尾，是第二篇和第四篇反复出现的套路。`errors="replace"` 解码、用一个大 try-except 把任何异常都变成一句人话返回，也是前面一路见过的那套「坏数据不甩锅给用户」。还有第五篇那条最该上心的：你的工具扛不扛得住被并发调用？这个 `fetch_url` 扛得住，因为它压根没有共享可变状态，每次调用自带 URL、自吐结果，两个线程同时跑它互不干扰。这不是运气，是设计。能做成无状态的工具，就别给它加状态，这是让你的工具默认就并发安全的最省力办法。
 
@@ -105,7 +105,7 @@ ALL_TOOLS = [
 
 ## 第三步：调教它的脾气
 
-agent 的行为风格，不在某段 if-else 里，在系统提示词里。打开 `corecoder/prompt.py`，那段 `# Rules` 就是你的 agent 的「行为准则」。原版里有这么几条：
+agent 的行为风格，不在某段 if-else 里，在系统提示词里。打开 `orbit/prompt.py`，那段 `# Rules` 就是你的 agent 的「行为准则」。原版里有这么几条：
 
 ```
 1. Read before edit. 改文件前先读。
@@ -117,13 +117,13 @@ agent 的行为风格，不在某段 if-else 里，在系统提示词里。打�
 
 ## 第四步：不止做个 CLI，把它当库用
 
-CoreCoder 顶层导出了 `Agent`、`LLM`、`Config`，意味着你不必只能用它那个交互式终端，你可以把它当库，搭出一个完全不同形态的 agent。
+Orbit 顶层导出了 `Agent`、`LLM`、`Config`，意味着你不必只能用它那个交互式终端，你可以把它当库，搭出一个完全不同形态的 agent。
 
 举个有意思的例子。第一篇和第五篇讲过，每个 `Agent` 只认它自己那套工具。利用这点，我们能拼一个「只读」的代码审查 agent，它在物理上就不可能改你的文件或者跑命令，因为我们根本没给它写工具和 bash：
 
 ```python
-from corecoder import Agent, LLM
-from corecoder.tools import get_tool
+from orbit import Agent, LLM
+from orbit.tools import get_tool
 
 llm = LLM(
     model="deepseek-chat",
@@ -139,7 +139,7 @@ reviewer = Agent(
 )
 
 report = reviewer.chat(
-    "审查 corecoder/agent.py，找出并发相关的隐患，列成一份清单。"
+    "审查 orbit/agent.py，找出并发相关的隐患，列成一份清单。"
 )
 print(report)
 ```
@@ -165,13 +165,13 @@ def test_fetch_rejects_non_http():
 
 ## 你可以往哪走得更远
 
-CoreCoder 是个起点，不是终点。它故意留白了不少地方，每一处都是你可以往下做的方向，而且前面几篇基本都点过名：
+Orbit 是个起点，不是终点。它故意留白了不少地方，每一处都是你可以往下做的方向，而且前面几篇基本都点过名：
 
 - **给 bash 上真沙箱**。第二篇说透了，正则黑名单只是防手滑，不是安全边界。要面对不可信输入，得上 `seccomp` 或者容器级隔离。
-- **补 fallback 模型和美元硬预算**。第三篇讲过 CoreCoder 故意没做这两样，因为它们会拖进 provider 专属逻辑。你要做生产部署，这两样迟早得加。
-- **把并发做得更细**。第五篇说的那条，区分工具「读」还是「写」来决定能不能并发，CoreCoder 还没做，是可以认真补的。
+- **补 fallback 模型和美元硬预算**。第三篇讲过 Orbit 故意没做这两样，因为它们会拖进 provider 专属逻辑。你要做生产部署，这两样迟早得加。
+- **把并发做得更细**。第五篇说的那条，区分工具「读」还是「写」来决定能不能并发，Orbit 还没做，是可以认真补的。
 - **接 MCP**。让你的 agent 能挂上 Model Context Protocol 的工具生态，一下子接通一大批现成的外部能力。
-- **给子 agent 更多模式**。第五篇提过 Claude Code 的子 agent 能在独立 worktree 或后台跑，CoreCoder 只做了最朴素的同步一种。
+- **给子 agent 更多模式**。第五篇提过 Claude Code 的子 agent 能在独立 worktree 或后台跑，Orbit 只做了最朴素的同步一种。
 
 挑一个你真正需要的去做。别因为清单长就焦虑，agent 的迷人之处恰恰在于，它的核心小到一个人一个周末能读透，而它的边界又开阔到你能往任意方向长。
 

@@ -6,7 +6,7 @@ provider by changing OPENAI_BASE_URL + OPENAI_API_KEY. That's it.
 
 For providers that are NOT OpenAI-compatible (AWS Bedrock, Google Vertex,
 etc.), use the LiteLLM backend which routes to 100+ providers through a
-single unified interface. Set CORECODER_PROVIDER=litellm.
+single unified interface. Set ORBIT_PROVIDER=litellm.
 """
 
 import json
@@ -22,7 +22,7 @@ class ToolCall:
     name: str
     arguments: dict
 
-# LLMResponse 是CoreCoder内部的“模型响应DTO”。它把外部SDK返回、流式chunk、工具调用和token统计统一封装起来，让 Agent 层只处理稳定的业务语义：模型说了什么、要调什么工具、消耗了多少token。
+# LLMResponse 是Orbit内部的“模型响应DTO”。它把外部SDK返回、流式chunk、工具调用和token统计统一封装起来，让 Agent 层只处理稳定的业务语义：模型说了什么、要调什么工具、消耗了多少token。
 @dataclass
 class LLMResponse:
     content: str = ""
@@ -272,7 +272,7 @@ class LiteLLM(LLM):
     a single interface to switch between any provider by changing
     the model string.
 
-    Set CORECODER_PROVIDER=litellm and use LiteLLM model strings
+    Set ORBIT_PROVIDER=litellm and use LiteLLM model strings
     like ``anthropic/claude-3-haiku``, ``bedrock/anthropic.claude-v2``,
     ``vertex_ai/gemini-pro``, etc.
     """

@@ -1,4 +1,4 @@
-"""Permission and access-control policy for CoreCoder harness."""
+"""Permission and access-control policy for Orbit harness."""
 
 from __future__ import annotations
 
@@ -26,14 +26,14 @@ SENSITIVE_PATH_PATTERNS: tuple[str, ...] = (
     "*/.docker/config.json",
     "*/.kube/config",
     "*/.env",
-    "*/.corecoder/credentials.json",
+    "*/.orbit/credentials.json",
 )
 
 DEFAULT_PROTECTED_PATTERNS: tuple[str, ...] = (
-    "corecoder/agent.py",
-    "corecoder/harness/*",
-    "corecoder/tools/*",
-    "corecoder/config.py",
+    "orbit/agent.py",
+    "orbit/harness/*",
+    "orbit/tools/*",
+    "orbit/config.py",
     "pyproject.toml",
 )
 

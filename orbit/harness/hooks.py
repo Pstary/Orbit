@@ -1,4 +1,4 @@
-"""Hook kernel for CoreCoder harness lifecycle events."""
+"""Hook kernel for Orbit harness lifecycle events."""
 
 from __future__ import annotations
 

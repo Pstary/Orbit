@@ -1,14 +1,14 @@
-"""Tests for the CoreCoder harness layer."""
+"""Tests for the Orbit harness layer."""
 
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from corecoder.harness import CoreCoderHarness, HarnessConfig, HookEvent, HookResult, PermissionMode
-from corecoder.harness.sandbox import default_test_log_dir
-from corecoder.harness.trace import default_trace_dir
-from corecoder.llm import LLMResponse, ScriptedLLM, ToolCall
-from corecoder.tools import get_tool
+from orbit.harness import OrbitHarness, HarnessConfig, HookEvent, HookResult, PermissionMode
+from orbit.harness.sandbox import default_test_log_dir
+from orbit.harness.trace import default_trace_dir
+from orbit.llm import LLMResponse, ScriptedLLM, ToolCall
+from orbit.tools import get_tool
 
 
 @dataclass
@@ -19,7 +19,7 @@ class _ToolCall:
 
 
 def test_harness_wraps_chat_and_saves_trace(tmp_path):
-    harness = CoreCoderHarness(HarnessConfig(
+    harness = OrbitHarness(HarnessConfig(
         workspace_root=tmp_path,
         trace_dir=tmp_path / "traces",
         permission_mode=PermissionMode.FULL_AUTO,
@@ -58,9 +58,9 @@ def test_harness_wraps_chat_and_saves_trace(tmp_path):
 
 
 def test_harness_blocks_paths_outside_workspace(tmp_path):
-    outside = tmp_path.parent / "outside-corecoder-harness.txt"
+    outside = tmp_path.parent / "outside-orbit-harness.txt"
     outside.write_text("secret", encoding="utf-8")
-    harness = CoreCoderHarness(HarnessConfig(
+    harness = OrbitHarness(HarnessConfig(
         workspace_root=tmp_path,
         trace_dir=tmp_path / "traces",
         permission_mode=PermissionMode.FULL_AUTO,
@@ -76,7 +76,7 @@ def test_harness_blocks_paths_outside_workspace(tmp_path):
 
 
 def test_default_mode_requires_approval_for_write(tmp_path):
-    harness = CoreCoderHarness(HarnessConfig(
+    harness = OrbitHarness(HarnessConfig(
         workspace_root=tmp_path,
         trace_dir=tmp_path / "traces",
         permission_mode=PermissionMode.DEFAULT,
@@ -97,7 +97,7 @@ def test_default_mode_requires_approval_for_write(tmp_path):
 
 
 def test_custom_pre_tool_hook_can_block_execution(tmp_path):
-    harness = CoreCoderHarness(HarnessConfig(
+    harness = OrbitHarness(HarnessConfig(
         workspace_root=tmp_path,
         trace_dir=tmp_path / "traces",
         permission_mode=PermissionMode.FULL_AUTO,
@@ -122,7 +122,7 @@ def test_default_trace_dir_uses_package_date_directory():
     date_dir = datetime.now(timezone.utc).strftime("%Y%m%d")
     trace_dir = default_trace_dir()
 
-    assert trace_dir.parts[-3:] == ("corecoder", "trace", date_dir)
+    assert trace_dir.parts[-3:] == ("orbit", "trace", date_dir)
 
 
 def test_default_test_log_dir_uses_project_tests_date_directory():
@@ -134,7 +134,7 @@ def test_default_test_log_dir_uses_project_tests_date_directory():
 
 def test_bash_test_command_writes_test_log(tmp_path):
     test_log_dir = tmp_path / "tests" / "logs" / "20990101"
-    harness = CoreCoderHarness(HarnessConfig(
+    harness = OrbitHarness(HarnessConfig(
         workspace_root=tmp_path,
         trace_dir=tmp_path / "traces",
         test_log_dir=test_log_dir,

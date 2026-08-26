@@ -7,14 +7,14 @@ dist/
 build/
 .eggs/
 *.egg
-.env
 .venv/
 venv/
 .mypy_cache/
 .ruff_cache/
-.corecoder_history
+.orbit_history
 .DS_Store
 .pytest_cache/
 .tmp/
-corecoder/trace/
+orbit/trace/
 tests/logs/
+assets/

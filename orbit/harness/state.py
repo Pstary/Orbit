@@ -1,4 +1,4 @@
-"""Runtime state owned by the CoreCoder harness."""
+"""Runtime state owned by the Orbit harness."""
 
 from __future__ import annotations
 

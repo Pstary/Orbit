@@ -1,13 +1,13 @@
-"""Harness layer for CoreCoder runtime governance."""
+"""Harness layer for Orbit runtime governance."""
 
-from .core import CoreCoderHarness, HarnessConfig
+from .core import OrbitHarness, HarnessConfig
 from .hooks import HookEvent, HookManager, HookResult
 from .permissions import PermissionMode
 from .state import HarnessState
 from .trace import TraceRecorder
 
 __all__ = [
-    "CoreCoderHarness",
+    "OrbitHarness",
     "HarnessConfig",
     "HarnessState",
     "HookEvent",

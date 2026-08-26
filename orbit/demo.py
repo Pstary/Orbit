@@ -12,7 +12,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 
-from .harness import CoreCoderHarness, HarnessConfig, PermissionMode
+from .harness import OrbitHarness, HarnessConfig, PermissionMode
 from .llm import LLMResponse, ScriptedLLM, ToolCall
 
 console = Console()
@@ -71,14 +71,14 @@ def _summarize(args: dict) -> str:
 
 
 def run_demo() -> int:
-    workdir = Path(tempfile.mkdtemp(prefix="corecoder-demo-"))
-    harness = CoreCoderHarness(HarnessConfig(
+    workdir = Path(tempfile.mkdtemp(prefix="orbit-demo-"))
+    harness = OrbitHarness(HarnessConfig(
         workspace_root=workdir,
         permission_mode=PermissionMode.FULL_AUTO,
     ))
     agent = harness.create_agent(llm=ScriptedLLM(_script(workdir)))
 
-    console.print(Panel.fit(f"[bold]{_TASK}[/]", title="corecoder demo (offline)"))
+    console.print(Panel.fit(f"[bold]{_TASK}[/]", title="orbit demo (offline)"))
     result = harness.run_chat(
         agent,
         _TASK,

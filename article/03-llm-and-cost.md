@@ -2,7 +2,7 @@
 
 前两篇讲的是循环和工具，也就是 agent 的手脚。这一篇讲大脑接口：模型怎么接进来，流式输出怎么处理，provider 抽风了怎么扛，以及一个被很多教程跳过、但你上线后第一天就会关心的问题，这一轮到底花了多少钱。
 
-对应的文件是 `corecoder/llm.py`，336 行，是整个项目最大的单文件。它大，是因为它替你扛下了和真实 API 打交道时所有不优雅的部分。
+对应的文件是 `orbit/llm.py`，336 行，是整个项目最大的单文件。它大，是因为它替你扛下了和真实 API 打交道时所有不优雅的部分。
 
 ## 一个赌注：大家都长得像 OpenAI
 
@@ -10,13 +10,13 @@
 
 > 既然大多数 provider（DeepSeek、Qwen、Kimi、GLM、Ollama 等）都暴露了 OpenAI 兼容的接口，我们就直接用 openai SDK。换 provider 只需要改 `OPENAI_BASE_URL` 和 `OPENAI_API_KEY`，没了。
 
-这个赌注在 2026 年基本是稳赢的。OpenAI 的 `/v1/chat/completions` 接口形状已经成了事实标准，国内外绝大多数模型服务要么原生兼容，要么提供一个兼容端点。所以 CoreCoder 的主力 `LLM` 类，本质上就是 openai 官方 SDK 外面薄薄一层包装。你想从 OpenAI 换到 DeepSeek，不改一行代码，改两个环境变量：
+这个赌注在 2026 年基本是稳赢的。OpenAI 的 `/v1/chat/completions` 接口形状已经成了事实标准，国内外绝大多数模型服务要么原生兼容，要么提供一个兼容端点。所以 Orbit 的主力 `LLM` 类，本质上就是 openai 官方 SDK 外面薄薄一层包装。你想从 OpenAI 换到 DeepSeek，不改一行代码，改两个环境变量：
 
 ```bash
-export OPENAI_API_KEY=sk-... OPENAI_BASE_URL=https://api.deepseek.com CORECODER_MODEL=deepseek-chat
+export OPENAI_API_KEY=sk-... OPENAI_BASE_URL=https://api.deepseek.com ORBIT_MODEL=deepseek-chat
 ```
 
-这个「一套接口接住所有人」的选择，是 CoreCoder 能这么小的重要原因之一。它没有为每家 provider 写一个 adapter，因为它赌大家都会向 OpenAI 的形状靠拢。
+这个「一套接口接住所有人」的选择，是 Orbit 能这么小的重要原因之一。它没有为每家 provider 写一个 adapter，因为它赌大家都会向 OpenAI 的形状靠拢。
 
 那不兼容的怎么办？比如 AWS Bedrock、Google Vertex 这些。`llm.py` 末尾有一个 `LiteLLM` 子类兜底，后面会讲。先看主路径。
 
@@ -24,7 +24,7 @@ export OPENAI_API_KEY=sk-... OPENAI_BASE_URL=https://api.deepseek.com CORECODER_
 
 `LLM.chat()` 把消息发出去，开了 `stream=True`，然后一块一块地收。文本好办，来一块拼一块。真正麻烦的是工具调用，因为工具调用的参数也是流式吐出来的，一个调用的 JSON 参数会被切成好几个碎片，分散在多个 chunk 里到达，你得自己把它们按调用的次序缝回去。
 
-CoreCoder 用一个以 index 为键的字典来缝：
+Orbit 用一个以 index 为键的字典来缝：
 
 ```python
 tc_map: dict[int, dict] = {}  # index -> {id, name, arguments_str}
@@ -63,7 +63,7 @@ for idx in sorted(tc_map):
 
 ## token 是怎么数出来的
 
-要算钱，先得知道每次调用花了多少 token。CoreCoder 不自己估，它问 provider 要准数。办法是在请求里加一个 `stream_options`：
+要算钱，先得知道每次调用花了多少 token。Orbit 不自己估，它问 provider 要准数。办法是在请求里加一个 `stream_options`：
 
 ```python
 params["stream_options"] = {"include_usage": True}
@@ -112,9 +112,9 @@ def _call_with_retry(self, params: dict, max_retries: int = 3):
 
 这段重试逻辑值得专门点出来，因为「这么小的项目应该没空管重试吧」是个很自然的误会，而事实正相反。重试不但在，还考虑得相当周到，连基类 `APIError` 可能没有 `status_code` 属性都用 `getattr` 防住了（不同版本的 SDK 异常层级不一样，硬取属性会炸）。
 
-CoreCoder 没做的，是 Claude Code 那种更重的优雅降级：服务端持续 529 时自动切换到一个备用模型（fallbackModel），以及按美元数的预算上限。这两样它确实没做，但原因不是疏忽，而是取舍。fallback 模型涉及「哪个模型能替哪个」这种跨 provider 难以统一的策略，美元预算又得维护一张随时在变的价目表。CoreCoder 把能干净实现的（退避重试）做了，把会引入大量 provider 专属逻辑的（fallback、硬预算）留给了你按需去加。知道「它做了什么」和「它故意没做什么」，比笼统说一句「它很简陋」有用得多。
+Orbit 没做的，是 Claude Code 那种更重的优雅降级：服务端持续 529 时自动切换到一个备用模型（fallbackModel），以及按美元数的预算上限。这两样它确实没做，但原因不是疏忽，而是取舍。fallback 模型涉及「哪个模型能替哪个」这种跨 provider 难以统一的策略，美元预算又得维护一张随时在变的价目表。Orbit 把能干净实现的（退避重试）做了，把会引入大量 provider 专属逻辑的（fallback、硬预算）留给了你按需去加。知道「它做了什么」和「它故意没做什么」，比笼统说一句「它很简陋」有用得多。
 
-还有个容易被忽略的协调细节。`stream_options` 是 OpenAI 的扩展，有些 provider 不认，会回一个 400。CoreCoder 的处理是：
+还有个容易被忽略的协调细节。`stream_options` 是 OpenAI 的扩展，有些 provider 不认，会回一个 400。Orbit 的处理是：
 
 ```python
 try:
@@ -142,7 +142,7 @@ class LiteLLM(LLM):
         # ...同样的指数退避...
 ```
 
-设了 `CORECODER_PROVIDER=litellm` 之后，你就能用 litellm 的模型串，比如 `anthropic/claude-3-haiku`、`bedrock/anthropic.claude-v2`、`vertex_ai/gemini-pro`。`drop_params=True` 是个贴心的开关，provider 不支持某个参数时自动丢掉而不是报错，省得你为每家去裁参数。绝大多数人用主路径就够了，LiteLLM 是那条「万一你的 provider 太特立独行」的后路。
+设了 `ORBIT_PROVIDER=litellm` 之后，你就能用 litellm 的模型串，比如 `anthropic/claude-3-haiku`、`bedrock/anthropic.claude-v2`、`vertex_ai/gemini-pro`。`drop_params=True` 是个贴心的开关，provider 不支持某个参数时自动丢掉而不是报错，省得你为每家去裁参数。绝大多数人用主路径就够了，LiteLLM 是那条「万一你的 provider 太特立独行」的后路。
 
 ## 把钱算出来
 
@@ -150,7 +150,7 @@ class LiteLLM(LLM):
 
 ```python
 _PRICING = {
-    "gpt-5.5": (5, 30),           # CoreCoder 默认就用它
+    "gpt-5.5": (5, 30),           # Orbit 默认就用它
     "deepseek-chat": (0.27, 1.10),
     "claude-sonnet-4-6": (3, 15),
     "kimi-k2.5": (0.6, 3),
@@ -187,7 +187,7 @@ Tokens: 12043 prompt + 3201 completion = 15244 total  (~$0.0621)
 
 ```python
 api_key = (
-    os.getenv("CORECODER_API_KEY")
+    os.getenv("ORBIT_API_KEY")
     or os.getenv("OPENAI_API_KEY")
     or os.getenv("DEEPSEEK_API_KEY")
     or ""
@@ -201,7 +201,7 @@ api_key = (
 - 「大多数 provider 都兼容 OpenAI 接口」这个赌注，让整个 provider 层薄到只是 openai SDK 的一层包装，换 provider 就是换两个环境变量。
 - 流式输出里，工具调用的参数是分片到达的，得按 index 累加再 `json.loads`，还要对坏数据优雅降级。
 - 重试该放在 provider 层，不该塞进主循环。指数退避只重试瞬时故障和 5xx，绝不重试 4xx。
-- CoreCoder 做了退避重试，故意没做 fallback 模型和美元硬预算，因为后两者会拖进大量 provider 专属逻辑。分清「没做」和「故意没做」。
+- Orbit 做了退避重试，故意没做 fallback 模型和美元硬预算，因为后两者会拖进大量 provider 专属逻辑。分清「没做」和「故意没做」。
 - 成本估算宁可对未知模型返回 `None`，也不编一个假精确的数字。诚实比好看重要。
 
 下一篇，我们面对 agent 最硬的那道物理约束：上下文窗口就这么大，一个长任务怎么塞得下。

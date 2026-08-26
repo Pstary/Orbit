@@ -1,4 +1,4 @@
-"""Sandbox boundary and command runners for CoreCoder harness."""
+"""Sandbox boundary and command runners for Orbit harness."""
 
 from __future__ import annotations
 

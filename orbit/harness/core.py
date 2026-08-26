@@ -1,4 +1,4 @@
-"""Top-level CoreCoder harness.
+"""Top-level Orbit harness.
 
 The harness owns runtime governance around the Agent loop: context lifecycle,
 permission checks, approval, sandboxed command execution, retries, timeouts,
@@ -38,8 +38,8 @@ class HarnessConfig:
     docker_image: str = "python:3.13-slim"
 
 
-class CoreCoderHarness:
-    """Runtime wrapper that coordinates CoreCoder execution lifecycle."""
+class OrbitHarness:
+    """Runtime wrapper that coordinates Orbit execution lifecycle."""
 
     def __init__(
         self,
@@ -83,7 +83,7 @@ class CoreCoderHarness:
         self._install_default_hooks()
 
     @classmethod
-    def default(cls) -> "CoreCoderHarness":
+    def default(cls) -> "OrbitHarness":
         return cls(HarnessConfig(permission_mode=PermissionMode.FULL_AUTO))
 
     def create_agent(self, llm, tools=None, max_context_tokens: int = 128_000, max_rounds: int = 50):

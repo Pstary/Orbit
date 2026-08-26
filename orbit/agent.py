@@ -1,6 +1,6 @@
 """Core agent loop.
 
-This is the heart of CoreCoder.  The pattern is simple:
+This is the heart of Orbit.  The pattern is simple:
 
     user message -> LLM (with tools) -> tool calls? -> execute -> loop
                                       -> text reply? -> return to user
@@ -11,14 +11,14 @@ which means it's done working and ready to report back.
 
 import concurrent.futures
 
-from .harness import CoreCoderHarness
+from .harness import OrbitHarness
 from .llm import LLM
 from .prompt import system_prompt
 from .tools import ALL_TOOLS
 from .tools.agent import AgentTool
 from .tools.base import Tool
 
-# agent.py实现的是CoreCoder的最小Agent执行引擎，核心是一个受max_rounds限制的ReAct-style循环：模型决定工具调用，Agent执行工具并回填结果，直到模型不再调用工具并返回最终回答。
+# agent.py实现的是Orbit的最小Agent执行引擎，核心是一个受max_rounds限制的ReAct-style循环：模型决定工具调用，Agent执行工具并回填结果，直到模型不再调用工具并返回最终回答。
 class Agent:
     def __init__(
         self,
@@ -26,13 +26,13 @@ class Agent:
         tools: list[Tool] | None = None,
         max_context_tokens: int = 128_000,
         max_rounds: int = 50,
-        harness: CoreCoderHarness | None = None,
+        harness: OrbitHarness | None = None,
     ):
         self.llm = llm
         self.tools = tools if tools is not None else ALL_TOOLS
         self._tool_by_name = {t.name: t for t in self.tools}
         self.messages: list[dict] = []
-        self.harness = harness or CoreCoderHarness.default()
+        self.harness = harness or OrbitHarness.default()
         self.context = self.harness.create_context(max_tokens=max_context_tokens)
         self.harness.attach_context(self.context)
         self.max_rounds = max_rounds
