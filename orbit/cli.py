@@ -18,6 +18,7 @@ from .config import Config, ConfigError, parse_config
 from .harness import OrbitHarness, HarnessConfig, PermissionMode
 from .llm import LLM, LiteLLM
 from .session import list_sessions, load_session, save_session
+from .tools import get_default_tools
 
 console = Console()
 
@@ -41,6 +42,9 @@ def _parse_args():
     p.add_argument("--max-retries", type=int, help="Maximum retries for failed tool execution")
     p.add_argument("--sandbox", choices=["local", "docker"], help="Harness sandbox backend")
     p.add_argument("--docker-image", help="Docker image used by the docker sandbox backend")
+    # MCP相关参数只影响工具发现，不改变Agent主循环和Harness执行模型。
+    p.add_argument("--mcp-config", help="Path to MCP server config (default: $ORBIT_MCP_CONFIG_FILE, .mcp.json, mcp.json)")
+    p.add_argument("--no-mcp", action="store_true", help="Disable MCP server discovery for this run")
     p.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
     return p.parse_args()
 
@@ -81,6 +85,11 @@ def main():
         config.sandbox_backend = args.sandbox
     if args.docker_image:
         config.docker_image = args.docker_image
+    # CLI显式参数优先级高于环境变量里的MCP配置。
+    if args.mcp_config:
+        config.mcp_config_file = args.mcp_config
+    if args.no_mcp:
+        config.mcp_enabled = False
 
     if not config.api_key:
         console.print("[red bold]No API key found.[/]")
@@ -113,6 +122,8 @@ def main():
         sys.exit(1)
     agent = harness.create_agent(
         llm=llm,
+        # 创建Agent前完成MCP工具发现，让远端工具和内置工具进入同一份schema。
+        tools=get_default_tools(include_mcp=config.mcp_enabled, mcp_config_path=config.mcp_config_file or None),
         max_context_tokens=config.max_context_tokens,
         max_rounds=50,
     )
@@ -208,7 +219,7 @@ def _repl(agent: Agent, config: Config):
     # 给交互式命令行配置输入历史记录文件，把 ~ 展开成当前用户的home目录。
     hist_path = os.path.expanduser("~/.orbit_history")
     """
-    # 创建一个 prompt_toolkit 的历史记录对象。后面传给输入框：
+    # 创建一个prompt_toolkit历史记录对象。后面传给输入框：
     ```
     pt_prompt(
         "You > ",

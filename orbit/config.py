@@ -53,6 +53,10 @@ class Config:
     max_retries: int = 0
     sandbox_backend: str = "local"
     docker_image: str = "python:3.13-slim"
+    # MCP配置文件路径；为空时走ORBIT_MCP_CONFIG或工作区默认配置文件发现。
+    mcp_config_file: str = ""
+    # MCP总开关；关闭后Agent只加载内置工具，不启动任何MCP服务。
+    mcp_enabled: bool = True
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -81,6 +85,9 @@ class Config:
             max_retries=int(_env("ORBIT_MAX_RETRIES", "0")),
             sandbox_backend=_env("ORBIT_SANDBOX", "local"),
             docker_image=_env("ORBIT_DOCKER_IMAGE", "python:3.13-slim"),
+            # MCP配置从环境变量进入Config，CLI参数会在main里覆盖这里的值。
+            mcp_config_file=_env("ORBIT_MCP_CONFIG_FILE", ""),
+            mcp_enabled=_env("ORBIT_MCP_DISABLED", "").lower() not in {"1", "true", "yes"},
         )
 
 

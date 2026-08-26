@@ -6,10 +6,11 @@ from orbit.agent import Agent
 from orbit.config import Config, ConfigError, parse_config
 from orbit.harness import OrbitHarness, HarnessConfig, PermissionMode, TraceRecorder
 from orbit.llm import LLM
-from orbit.tools import ALL_TOOLS
+from orbit.tools import ALL_TOOLS, get_default_tools
 
 __all__ = [
     "ALL_TOOLS",
+    "get_default_tools",
     "LLM",
     "Agent",
     "Config",
