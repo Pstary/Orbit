@@ -50,8 +50,42 @@ DEFAULT_DENIED_COMMAND_PATTERNS: tuple[str, ...] = (
     r"\bwget\b.*\|\s*(sudo\s+)?(ba)?sh\b",
 )
 
-READ_ONLY_TOOLS = {"read_file", "grep", "glob"}
+READ_ONLY_TOOLS = {"read_file", "grep", "glob", "fetch_url"}
 MUTATING_TOOLS = {"bash", "write_file", "edit_file"}
+READ_ONLY_COMMAND_NAMES = {
+    "cat",
+    "echo",
+    "find",
+    "grep",
+    "head",
+    "ls",
+    "pwd",
+    "rg",
+    "sed",
+    "tail",
+    "tree",
+    "wc",
+}
+READ_ONLY_GIT_SUBCOMMANDS = {
+    "branch",
+    "diff",
+    "grep",
+    "log",
+    "ls-files",
+    "rev-parse",
+    "show",
+    "status",
+}
+COMMAND_MUTATION_TOKENS = (
+    ">",
+    ">>",
+    ">|",
+    "2>",
+    "2>>",
+    "&>",
+    "&>>",
+    "tee ",
+)
 
 
 @dataclass(frozen=True)
@@ -90,12 +124,16 @@ class PolicyEngine:
         if tool_name in self.settings.denied_tools:
             return PermissionDecision(False, reason=f"{tool_name} is explicitly denied")
 
+        is_read_only = tool_name in READ_ONLY_TOOLS or (
+            tool_name == "bash" and command is not None and self._is_read_only_command(command)
+        )
+
         if file_path is not None:
             sensitive = self._sensitive_path_reason(file_path)
             if sensitive:
                 return PermissionDecision(False, reason=sensitive)
 
-            if self._is_protected_path(file_path):
+            if not is_read_only and self._is_protected_path(file_path):
                 return PermissionDecision(
                     allowed=False,
                     requires_approval=True,
@@ -110,7 +148,6 @@ class PolicyEngine:
         if tool_name in self.settings.allowed_tools:
             return PermissionDecision(True, reason=f"{tool_name} is explicitly allowed")
 
-        is_read_only = tool_name in READ_ONLY_TOOLS
         if self.settings.mode == PermissionMode.FULL_AUTO:
             return PermissionDecision(True, reason="full_auto mode allows this tool")
 
@@ -154,6 +191,34 @@ class PolicyEngine:
             if re.search(pattern, command):
                 return f"Command denied by policy pattern: {pattern}"
         return ""
+
+    def _is_read_only_command(self, command: str) -> bool:
+        if not command.strip():
+            return False
+        lowered = command.lower()
+        if any(token in lowered for token in COMMAND_MUTATION_TOKENS):
+            return False
+        if re.search(r"\b(cd|cp|mv|rm|mkdir|rmdir|touch|chmod|chown|install|patch|git\s+(apply|checkout|switch|reset|clean|commit|merge|rebase|pull|push))\b", lowered):
+            return False
+        commands = re.split(r"\s*(?:&&|\|\||;|\|)\s*", command)
+        for part in commands:
+            part = part.strip()
+            if not part:
+                continue
+            if not self._is_read_only_command_part(part):
+                return False
+        return True
+
+    def _is_read_only_command_part(self, part: str) -> bool:
+        words = part.split()
+        if not words:
+            return False
+        name = words[0]
+        if name in READ_ONLY_COMMAND_NAMES:
+            return True
+        if name == "git" and len(words) >= 2:
+            return words[1] in READ_ONLY_GIT_SUBCOMMANDS
+        return False
 
 
 def _policy_match_paths(file_path: str) -> tuple[str, ...]:

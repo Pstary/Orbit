@@ -96,6 +96,74 @@ def test_default_mode_requires_approval_for_write(tmp_path):
     assert not target.exists()
 
 
+def test_default_mode_allows_read_file_without_approval_even_for_protected_path(tmp_path):
+    protected = tmp_path / "orbit" / "agent.py"
+    protected.parent.mkdir()
+    protected.write_text("print('read only')\n", encoding="utf-8")
+    approvals = []
+    harness = OrbitHarness(
+        HarnessConfig(
+            workspace_root=tmp_path,
+            trace_dir=tmp_path / "traces",
+            permission_mode=PermissionMode.DEFAULT,
+        ),
+        approval_callback=lambda tool, arguments, reason: approvals.append((tool, arguments, reason)) or False,
+    )
+    read = get_tool("read_file")
+
+    result = harness.execute_tool_call(
+        read,
+        _ToolCall(id="c1", name="read_file", arguments={"file_path": str(protected)}),
+    )
+
+    assert "print('read only')" in result
+    assert approvals == []
+
+
+def test_default_mode_allows_read_only_bash_without_approval(tmp_path):
+    approvals = []
+    harness = OrbitHarness(
+        HarnessConfig(
+            workspace_root=tmp_path,
+            trace_dir=tmp_path / "traces",
+            permission_mode=PermissionMode.DEFAULT,
+        ),
+        approval_callback=lambda tool, arguments, reason: approvals.append((tool, arguments, reason)) or False,
+    )
+    bash = get_tool("bash")
+
+    result = harness.execute_tool_call(
+        bash,
+        _ToolCall(id="c1", name="bash", arguments={"command": "pwd && ls"}),
+    )
+
+    assert str(tmp_path) in result
+    assert approvals == []
+
+
+def test_default_mode_requires_approval_for_mutating_bash(tmp_path):
+    approvals = []
+    harness = OrbitHarness(
+        HarnessConfig(
+            workspace_root=tmp_path,
+            trace_dir=tmp_path / "traces",
+            permission_mode=PermissionMode.DEFAULT,
+        ),
+        approval_callback=lambda tool, arguments, reason: approvals.append((tool, arguments, reason)) or False,
+    )
+    bash = get_tool("bash")
+    target = tmp_path / "created.txt"
+
+    result = harness.execute_tool_call(
+        bash,
+        _ToolCall(id="c1", name="bash", arguments={"command": f"touch {target.name}"}),
+    )
+
+    assert "Blocked by harness approval" in result
+    assert approvals and approvals[0][0] == "bash"
+    assert not target.exists()
+
+
 def test_custom_pre_tool_hook_can_block_execution(tmp_path):
     harness = OrbitHarness(HarnessConfig(
         workspace_root=tmp_path,
