@@ -13,7 +13,7 @@ from rich.panel import Panel
 
 from . import __version__
 from .agent import Agent
-from .config import Config
+from .config import Config, ConfigError, parse_config
 from .llm import LLM, LiteLLM
 from .session import list_sessions, load_session, save_session
 
@@ -42,7 +42,11 @@ def main():
         from .demo import run_demo
         raise SystemExit(run_demo())
 
-    config = Config.from_env()
+    try:
+        config = parse_config()
+    except ConfigError as e:
+        console.print(f"[red bold]Configuration error:[/red bold] {e}")
+        sys.exit(1)
 
     # CLI args override env vars
     if args.model:
@@ -100,7 +104,7 @@ def main():
     # interactive REPL
     _repl(agent, config)
 
-
+# _run_once() 是CoreCoder的非交互执行入口，负责跑一次用户prompt、实时打印模型输出、展示工具调用，并把中断或异常转换成清晰的终端退出行为。
 def _run_once(agent: Agent, prompt: str):
     """Non-interactive: run one prompt and exit."""
     def on_token(tok):
@@ -130,23 +134,39 @@ def _repl(agent: Agent, config: Config):
         + "\nType [bold]/help[/bold] for commands, [bold]Ctrl+C[/bold] to cancel, [bold]quit[/bold] to exit.",
         border_style="blue",
     ))
-
+    # 给交互式命令行配置输入历史记录文件，把 ~ 展开成当前用户的home目录。
     hist_path = os.path.expanduser("~/.corecoder_history")
+    """
+    # 创建一个 prompt_toolkit 的历史记录对象。后面传给输入框：
+    ```
+    pt_prompt(
+        "You > ",
+        history=history,
+        ...
+    )
+    ```
+    这样你在CoreCoder交互式REPL里输入过的命令会被保存下来，下次可以用方向键上下翻历史输入。
+    """
     history = FileHistory(hist_path)
 
-    # Enter submits, Escape+Enter inserts a newline (for pasting code blocks etc.)
+    # 创建快捷键绑定对象，用来覆盖prompt_toolkit默认的回车行为。
     kb = KeyBindings()
 
+    # 按Enter时提交当前输入，让REPL开始处理这一轮用户消息。
     @kb.add("enter")
     def _submit(event):
+        # 先校验输入内容，再触发prompt_toolkit的提交处理。
         event.current_buffer.validate_and_handle()
 
+    # 按Esc+Enter时插入换行，方便用户粘贴多行代码或多行需求。
     @kb.add("escape", "enter")
     def _newline(event):
         event.current_buffer.insert_text("\n")
 
+    # 进入交互式REPL主循环，每一轮读取一次用户输入并处理。
     while True:
         try:
+            # 读取终端输入；开启multiline、历史记录和自定义快捷键。
             user_input = pt_prompt(
                 "You > ",
                 history=history,
@@ -154,104 +174,129 @@ def _repl(agent: Agent, config: Config):
                 key_bindings=kb,
                 prompt_continuation="...  ",
             ).strip()
+        # 用户按Ctrl+D或Ctrl+C时退出REPL。
         except (EOFError, KeyboardInterrupt):
             console.print("\nBye!")
             break
 
+        # 空输入不交给Agent处理，直接等待下一轮输入。
         if not user_input:
             continue
 
-        # built-in commands
+        # 处理内置命令，避免这些控制命令被当成普通prompt发给模型。
         if user_input.lower() in ("quit", "exit", "/quit", "/exit"):
             break
+        # 展示帮助面板。
         if user_input == "/help":
             _show_help()
             continue
+        # 清空当前对话历史，但保留同一个Agent实例和模型配置。
         if user_input == "/reset":
             agent.reset()
             console.print("[yellow]Conversation reset.[/yellow]")
             continue
+        # 展示当前LLM实例累计的token消耗和可估算成本。
         if user_input == "/tokens":
             p = agent.llm.total_prompt_tokens
             c = agent.llm.total_completion_tokens
             line = f"Tokens: [cyan]{p}[/cyan] prompt + [cyan]{c}[/cyan] completion = [bold]{p+c}[/bold] total"
             cost = agent.llm.estimated_cost
+            # 只有模型在价格表里时才展示成本估算。
             if cost is not None:
                 line += f"  (~${cost:.4f})"
             console.print(line)
             continue
+        # 查看或切换当前模型；/model无参数表示查看，有参数表示切换。
         if user_input == "/model" or user_input.startswith("/model "):
             new_model = user_input[7:].strip() if user_input.startswith("/model ") else ""
+            # 有新模型名时，同时更新LLM实例和运行期config。
             if new_model:
                 agent.llm.model = new_model
                 config.model = new_model
                 console.print(f"Switched to [cyan]{new_model}[/cyan]")
+            # 没有新模型名时，只打印当前模型。
             else:
                 console.print(f"Current model: [cyan]{config.model}[/cyan]")
             continue
+        # 手动触发上下文压缩，并展示压缩前后的估算token数。
         if user_input == "/compact":
             from .context import estimate_tokens
             before = estimate_tokens(agent.messages)
             compressed = agent.context.maybe_compress(agent.messages, agent.llm)
             after = estimate_tokens(agent.messages)
+            # 如果真的发生压缩，展示压缩前后token变化。
             if compressed:
                 console.print(f"[green]Compressed: {before} → {after} tokens ({len(agent.messages)} messages)[/green]")
+            # 如果未达到压缩条件，展示当前token和消息数量。
             else:
                 console.print(f"[dim]Nothing to compress ({before} tokens, {len(agent.messages)} messages)[/dim]")
             continue
+        # 保存当前会话，后续可以通过corecoder-r恢复。
         if user_input == "/save":
             sid = save_session(agent.messages, config.model)
             console.print(f"[green]Session saved: {sid}[/green]")
             console.print(f"Resume with: corecoder -r {sid}")
             continue
+        # 展示本次会话通过edit_file/write_file记录到的变更文件。
         if user_input == "/diff":
             from .tools.edit import _changed_files
+            # 没有记录到文件变更时给出空状态提示。
             if not _changed_files:
                 console.print("[dim]No files modified this session.[/dim]")
+            # 有变更时按文件名排序输出。
             else:
                 console.print(f"[bold]Files modified this session ({len(_changed_files)}):[/bold]")
                 for f in sorted(_changed_files):
                     console.print(f"  [cyan]{f}[/cyan]")
             continue
+        # 列出最近保存的会话，方便用户选择resume目标。
         if user_input == "/sessions":
             sessions = list_sessions()
+            # 没有保存过会话时给出空状态提示。
             if not sessions:
                 console.print("[dim]No saved sessions.[/dim]")
+            # 有会话时展示id、模型、保存时间和首条用户消息预览。
             else:
                 for s in sessions:
                     console.print(f"  [cyan]{s['id']}[/cyan] ({s['model']}, {s['saved_at']}) {s['preview']}")
             continue
 
-        # an unknown /command shouldn't be sent to the model as a prompt
+        # 未知/命令不应该发给模型，直接提示用户查看/help。
         if user_input.startswith("/"):
             console.print(f"[yellow]Unknown command: {user_input.split()[0]} (try /help)[/yellow]")
             continue
 
-        # call the agent
+        # 普通输入会进入Agent主循环。
         streamed: list[str] = []
 
+        # 记录并实时打印模型流式返回的文本片段。
         def on_token(tok, streamed=streamed):
             streamed.append(tok)
             print(tok, end="", flush=True)
 
+        # 工具执行前打印工具名和简略参数，给用户可观测性。
         def on_tool(name, kwargs):
             console.print(f"\n[dim]> {name}({_brief(kwargs)})[/dim]")
 
+        # 调用Agent处理用户输入，内部可能经历多轮LLM调用和工具调用。
         try:
             response = agent.chat(user_input, on_token=on_token, on_tool=on_tool)
+            # 如果已经流式打印过内容，这里只补一个换行。
             if streamed:
-                print()  # newline after streamed tokens
+                print()
+            # 如果没有流式内容，说明最终response是在工具调用后一次性返回的，用Markdown渲染。
             else:
-                # response wasn't streamed (came after tool calls)
                 console.print(Markdown(response))
+        # 当前轮被Ctrl+C中断时，不退出整个REPL，只提示中断。
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted.[/yellow]")
+        # 其他异常也只打印错误，保证REPL还能继续接受下一轮输入。
         except Exception as e:  # noqa: BLE001
-            # keep the REPL alive no matter what chat() throws
             console.print(f"\n[red]Error: {e}[/red]")
 
 
 def _show_help():
+    # 打印交互式REPL支持的内置命令和输入快捷键。
     console.print(Panel(
         "[bold]Commands:[/bold]\n"
         "  /help          Show this help\n"
@@ -274,5 +319,7 @@ def _show_help():
 
 
 def _brief(kwargs: dict, maxlen: int = 80) -> str:
+    # 把工具参数压缩成单行短文本，避免工具调用提示占满终端。
     s = ", ".join(f"{k}={repr(v)[:40]}" for k, v in kwargs.items())
+    # 超过maxlen时截断并追加省略号。
     return s[:maxlen] + ("..." if len(s) > maxlen else "")

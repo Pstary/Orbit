@@ -7,6 +7,8 @@ Claude Code's BashTool is 1,143 lines. This is the distilled version:
 - Working directory tracking (cd awareness)
 """
 
+# bash 工具实现 ，给 Agent 用来执行终端命令。
+
 import os
 import re
 import subprocess
@@ -78,18 +80,23 @@ class BashTool(Tool):
                 encoding="utf-8",
                 errors="replace",
                 timeout=timeout,
+                # 表示“让这个shell命令在哪个目录下执行”。
                 cwd=cwd,
             )
 
-            # track cd commands so next command runs in the right place
+            # 只有命令成功执行后才更新记录的 cwd，避免失败的 `cd` 污染下一次命令的目录。
             if proc.returncode == 0:
                 _update_cwd(command, cwd)
+
+            # 先返回 stdout，再把 stderr 和退出码拼到同一段文本里，保证调用方始终拿到
+            # 一个普通文本结果。
             out = proc.stdout
             if proc.stderr:
                 out += f"\n[stderr]\n{proc.stderr}"
             if proc.returncode != 0:
                 out += f"\n[exit code: {proc.returncode}]"
-            # keep head + tail to preserve the most useful info
+
+            # 对超长输出做截断，但保留开头和结尾：命令上下文通常在开头，错误细节通常在结尾。
             if len(out) > 15_000:
                 out = (
                     out[:6000]
@@ -98,9 +105,10 @@ class BashTool(Tool):
                 )
             return out.strip() or "(no output)"
         except subprocess.TimeoutExpired:
+            # 超时也作为普通文本返回，避免工具调用在传输层失败，便于上层继续分析。
             return f"Error: timed out after {timeout}s"
         except Exception as e:  # noqa: BLE001
-            # anything else from the OS (spawn failure etc.) also comes back as text
+            # 其他 OS 层异常（例如进程启动失败）同样转成文本返回。
             return f"Error running command: {e}"
 
 
@@ -113,19 +121,22 @@ def _check_dangerous(cmd: str) -> str | None:
 
 
 def _update_cwd(command: str, current_cwd: str):
-    """Track directory changes from cd commands, per thread."""
-    # walk each cd in a && chain, resolving relative targets against the dir the
-    # previous cd landed in (not the original cwd) so `cd a && cd b` ends in a/b
+    """按线程追踪cd命令导致的目录变化。"""
+    # 逐段处理`&&`串联的命令，只追踪其中的`cd`片段。
+    # 相对路径基于上一次`cd`后的目录继续解析，所以`cd a && cd b`最终会落到 a/b。
     running = current_cwd
     changed = False
     for part in command.split("&&"):
         part = part.strip()
         if part.startswith("cd "):
+            # 提取`cd`目标目录，并兼容简单的单/双引号包裹。
             target = part[3:].strip().strip("'\"")
             if target:
                 new_dir = os.path.normpath(os.path.join(running, os.path.expanduser(target)))
                 if os.path.isdir(new_dir):
+                    # 只在目标目录真实存在时更新，避免把无效路径写入线程本地 cwd。
                     running = new_dir
                     changed = True
     if changed:
+        # 将最终目录写回线程本地状态，供下一次 bash 工具调用复用。
         _local.cwd = running

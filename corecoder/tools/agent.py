@@ -36,24 +36,27 @@ class AgentTool(Tool):
     _parent_agent = None
 
     def execute(self, task: str) -> str:
+        # AgentTool必须挂到父Agent上才能工作，否则无法复用父Agent的LLM和工具列表。
         if self._parent_agent is None:
             return "Error: agent tool not initialized (no parent agent)"
 
-        # import here to avoid circular dep
+        # 延迟导入Agent，避免模块加载阶段出现循环依赖。
         from ..agent import Agent
 
         parent = self._parent_agent
+        # 创建一个独立子Agent：复用父Agent的LLM和上下文上限，但拥有自己的对话历史。
         sub = Agent(
             llm=parent.llm,
-            tools=[t for t in parent.tools if t.name != "agent"],  # no recursive agents
+            # 过滤掉agent工具，禁止子Agent继续创建子Agent导致递归失控。
+            tools=[t for t in parent.tools if t.name != "agent"],
             max_context_tokens=parent.context.max_tokens,
             max_rounds=20,
         )
 
-        # a sub-agent failure comes back as text, never propagates into the parent
+        # 子Agent失败只返回文本错误，不把异常继续抛给父Agent。
         try:
             result = sub.chat(task)
-            # trim long results to avoid blowing up parent's context
+            # 子Agent结果会进入父Agent上下文，过长时需要截断以控制上下文膨胀。
             if len(result) > 5000:
                 result = result[:4500] + "\n... (sub-agent output truncated)"
             return f"[Sub-agent completed]\n{result}"

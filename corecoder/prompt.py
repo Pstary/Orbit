@@ -5,7 +5,9 @@ import platform
 
 
 def system_prompt(tools) -> str:
+    # 读取当前运行环境,获取当前工作目录、操作系统名称、系统版本、机器架构、Python版本
     cwd = os.getcwd()
+    # 生成工具说明列表，它会遍历传进来的所有工具，把每个工具的名字和描述拼成Markdown列表。
     tool_list = "\n".join(f"- **{t.name}**: {t.description}" for t in tools)
     uname = platform.uname()
 
