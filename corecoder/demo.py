@@ -12,7 +12,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 
-from .agent import Agent
+from .harness import CoreCoderHarness, HarnessConfig, PermissionMode
 from .llm import LLMResponse, ScriptedLLM, ToolCall
 
 console = Console()
@@ -72,13 +72,19 @@ def _summarize(args: dict) -> str:
 
 def run_demo() -> int:
     workdir = Path(tempfile.mkdtemp(prefix="corecoder-demo-"))
-    agent = Agent(llm=ScriptedLLM(_script(workdir)))
+    harness = CoreCoderHarness(HarnessConfig(
+        workspace_root=workdir,
+        permission_mode=PermissionMode.FULL_AUTO,
+    ))
+    agent = harness.create_agent(llm=ScriptedLLM(_script(workdir)))
 
     console.print(Panel.fit(f"[bold]{_TASK}[/]", title="corecoder demo (offline)"))
-    result = agent.chat(
+    result = harness.run_chat(
+        agent,
         _TASK,
         on_tool=lambda name, args: console.print(f"[cyan]tool:[/] {name} {_summarize(args)}"),
     )
     console.print(Panel.fit(Markdown(result), title="final"))
     console.print(f"[dim]workspace kept at {workdir}[/]")
+    console.print(f"[dim]trace saved at {harness.close()}[/]")
     return 0

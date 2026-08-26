@@ -51,6 +51,7 @@ class AgentTool(Tool):
             tools=[t for t in parent.tools if t.name != "agent"],
             max_context_tokens=parent.context.max_tokens,
             max_rounds=20,
+            harness=parent.harness,
         )
 
         # 子Agent失败只返回文本错误，不把异常继续抛给父Agent。

@@ -34,6 +34,14 @@ class Config:
     temperature: float = 0.0
     max_context_tokens: int = 128_000
     provider: str = "openai"
+    permission_mode: str = "default"
+    workspace_root: str = ""
+    trace_dir: str = ""
+    test_log_dir: str = ""
+    tool_timeout_seconds: int = 60
+    max_retries: int = 0
+    sandbox_backend: str = "local"
+    docker_image: str = "python:3.13-slim"
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -54,4 +62,23 @@ class Config:
             temperature=float(os.getenv("CORECODER_TEMPERATURE", "0")),
             max_context_tokens=int(os.getenv("CORECODER_MAX_CONTEXT", "128000")),
             provider=os.getenv("CORECODER_PROVIDER", "openai"),
+            permission_mode=os.getenv("CORECODER_PERMISSION_MODE", "default"),
+            workspace_root=os.getenv("CORECODER_WORKSPACE_ROOT", ""),
+            trace_dir=os.getenv("CORECODER_TRACE_DIR", ""),
+            test_log_dir=os.getenv("CORECODER_TEST_LOG_DIR", ""),
+            tool_timeout_seconds=int(os.getenv("CORECODER_TOOL_TIMEOUT", "60")),
+            max_retries=int(os.getenv("CORECODER_MAX_RETRIES", "0")),
+            sandbox_backend=os.getenv("CORECODER_SANDBOX", "local"),
+            docker_image=os.getenv("CORECODER_DOCKER_IMAGE", "python:3.13-slim"),
         )
+
+
+class ConfigError(Exception):
+    """Raised when CoreCoder configuration cannot be parsed."""
+
+
+def parse_config() -> Config:
+    try:
+        return Config.from_env()
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc

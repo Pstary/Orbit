@@ -4,7 +4,20 @@ __version__ = "0.4.0"
 
 from corecoder.agent import Agent
 from corecoder.config import Config, ConfigError, parse_config
+from corecoder.harness import CoreCoderHarness, HarnessConfig, PermissionMode, TraceRecorder
 from corecoder.llm import LLM
 from corecoder.tools import ALL_TOOLS
 
-__all__ = ["ALL_TOOLS", "LLM", "Agent", "Config", "ConfigError", "parse_config", "__version__"]
+__all__ = [
+    "ALL_TOOLS",
+    "LLM",
+    "Agent",
+    "Config",
+    "ConfigError",
+    "parse_config",
+    "CoreCoderHarness",
+    "HarnessConfig",
+    "PermissionMode",
+    "TraceRecorder",
+    "__version__",
+]

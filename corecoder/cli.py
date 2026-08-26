@@ -3,6 +3,7 @@
 import argparse
 import os
 import sys
+from pathlib import Path
 
 from prompt_toolkit import prompt as pt_prompt
 from prompt_toolkit.history import FileHistory
@@ -14,6 +15,7 @@ from rich.panel import Panel
 from . import __version__
 from .agent import Agent
 from .config import Config, ConfigError, parse_config
+from .harness import CoreCoderHarness, HarnessConfig, PermissionMode
 from .llm import LLM, LiteLLM
 from .session import list_sessions, load_session, save_session
 
@@ -31,6 +33,14 @@ def _parse_args():
     p.add_argument("-p", "--prompt", help="One-shot prompt (non-interactive mode)")
     p.add_argument("--demo", action="store_true", help="Run the offline scripted demo (no API key needed)")
     p.add_argument("-r", "--resume", metavar="ID", help="Resume a saved session")
+    p.add_argument("--permission-mode", choices=[m.value for m in PermissionMode], help="Harness permission mode")
+    p.add_argument("--workspace-root", help="Workspace root for harness path isolation")
+    p.add_argument("--trace-dir", help="Directory where harness trace files are written")
+    p.add_argument("--test-log-dir", help="Directory where harness test command logs are written")
+    p.add_argument("--tool-timeout", type=int, help="Maximum seconds for one tool execution")
+    p.add_argument("--max-retries", type=int, help="Maximum retries for failed tool execution")
+    p.add_argument("--sandbox", choices=["local", "docker"], help="Harness sandbox backend")
+    p.add_argument("--docker-image", help="Docker image used by the docker sandbox backend")
     p.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
     return p.parse_args()
 
@@ -55,6 +65,22 @@ def main():
         config.base_url = args.base_url
     if args.api_key:
         config.api_key = args.api_key
+    if args.permission_mode:
+        config.permission_mode = args.permission_mode
+    if args.workspace_root:
+        config.workspace_root = args.workspace_root
+    if args.trace_dir:
+        config.trace_dir = args.trace_dir
+    if args.test_log_dir:
+        config.test_log_dir = args.test_log_dir
+    if args.tool_timeout is not None:
+        config.tool_timeout_seconds = args.tool_timeout
+    if args.max_retries is not None:
+        config.max_retries = args.max_retries
+    if args.sandbox:
+        config.sandbox_backend = args.sandbox
+    if args.docker_image:
+        config.docker_image = args.docker_image
 
     if not config.api_key:
         console.print("[red bold]No API key found.[/]")
@@ -80,7 +106,16 @@ def main():
         temperature=config.temperature,
         max_tokens=config.max_tokens,
     )
-    agent = Agent(llm=llm, max_context_tokens=config.max_context_tokens)
+    try:
+        harness = _build_harness(config)
+    except ValueError as e:
+        console.print(f"[red bold]Configuration error:[/red bold] {e}")
+        sys.exit(1)
+    agent = harness.create_agent(
+        llm=llm,
+        max_context_tokens=config.max_context_tokens,
+        max_rounds=50,
+    )
 
     # resume saved session
     if args.resume:
@@ -98,11 +133,47 @@ def main():
 
     # one-shot mode
     if args.prompt:
-        _run_once(agent, args.prompt)
+        try:
+            _run_once(agent, args.prompt)
+        finally:
+            trace_path = harness.close()
+            console.print(f"[dim]Trace saved: {trace_path}[/dim]")
         return
 
     # interactive REPL
-    _repl(agent, config)
+    try:
+        _repl(agent, config)
+    finally:
+        trace_path = harness.close()
+        console.print(f"[dim]Trace saved: {trace_path}[/dim]")
+
+
+def _build_harness(config: Config) -> CoreCoderHarness:
+    permission_mode = PermissionMode(config.permission_mode)
+    workspace_root = Path(config.workspace_root).expanduser() if config.workspace_root else Path.cwd()
+    trace_dir = Path(config.trace_dir).expanduser() if config.trace_dir else None
+    test_log_dir = Path(config.test_log_dir).expanduser() if config.test_log_dir else None
+
+    def approve(tool_name: str, arguments: dict, reason: str) -> bool:
+        console.print(f"\n[yellow]Approval required:[/] {tool_name}")
+        console.print(f"[dim]{reason}[/dim]")
+        console.print(f"[dim]{_brief(arguments, maxlen=160)}[/dim]")
+        reply = input("Approve? [y/N] ").strip().lower()
+        return reply in {"y", "yes"}
+
+    return CoreCoderHarness(
+        HarnessConfig(
+            workspace_root=workspace_root,
+            trace_dir=trace_dir,
+            test_log_dir=test_log_dir,
+            permission_mode=permission_mode,
+            tool_timeout_seconds=config.tool_timeout_seconds,
+            max_retries=config.max_retries,
+            sandbox_backend=config.sandbox_backend,
+            docker_image=config.docker_image,
+        ),
+        approval_callback=approve,
+    )
 
 # _run_once() 是CoreCoder的非交互执行入口，负责跑一次用户prompt、实时打印模型输出、展示工具调用，并把中断或异常转换成清晰的终端退出行为。
 def _run_once(agent: Agent, prompt: str):
@@ -114,7 +185,7 @@ def _run_once(agent: Agent, prompt: str):
         console.print(f"\n[dim]> {name}({_brief(kwargs)})[/dim]")
 
     try:
-        agent.chat(prompt, on_token=on_token, on_tool=on_tool)
+        agent.harness.run_chat(agent, prompt, on_token=on_token, on_tool=on_tool)
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")
         sys.exit(130)
@@ -278,9 +349,10 @@ def _repl(agent: Agent, config: Config):
         def on_tool(name, kwargs):
             console.print(f"\n[dim]> {name}({_brief(kwargs)})[/dim]")
 
-        # 调用Agent处理用户输入，内部可能经历多轮LLM调用和工具调用。
+        # 调用Harness顶层入口处理用户输入，内部可能经历多轮LLM调用和工具调用。
+        # run_chat只在内存里追加trace事件；完整trace在用户退出REPL时由harness.close()统一落盘。
         try:
-            response = agent.chat(user_input, on_token=on_token, on_tool=on_tool)
+            response = agent.harness.run_chat(agent, user_input, on_token=on_token, on_tool=on_tool)
             # 如果已经流式打印过内容，这里只补一个换行。
             if streamed:
                 print()

@@ -10,9 +10,8 @@ which means it's done working and ready to report back.
 """
 
 import concurrent.futures
-import inspect
 
-from .context import ContextManager
+from .harness import CoreCoderHarness
 from .llm import LLM
 from .prompt import system_prompt
 from .tools import ALL_TOOLS
@@ -27,14 +26,22 @@ class Agent:
         tools: list[Tool] | None = None,
         max_context_tokens: int = 128_000,
         max_rounds: int = 50,
+        harness: CoreCoderHarness | None = None,
     ):
         self.llm = llm
         self.tools = tools if tools is not None else ALL_TOOLS
         self._tool_by_name = {t.name: t for t in self.tools}
         self.messages: list[dict] = []
-        self.context = ContextManager(max_tokens=max_context_tokens)
+        self.harness = harness or CoreCoderHarness.default()
+        self.context = self.harness.create_context(max_tokens=max_context_tokens)
+        self.harness.attach_context(self.context)
         self.max_rounds = max_rounds
         self._system = system_prompt(self.tools)
+        self.harness.tracer.record("agent", "agent", "agent_initialized", {
+            "tool_names": [t.name for t in self.tools],
+            "max_rounds": self.max_rounds,
+            "max_context_tokens": max_context_tokens,
+        })
 
         # Agent初始化时会遍历所有工具。如果某个工具是 AgentTool ，就把当前这个 Agent对象塞进工具的_parent_agent字段里。
         # 这是子Agent能力的 wiring/binding代码，用来让agent工具拿到父 Agent上下文，从而派生一个受控的子Agent。
@@ -51,21 +58,27 @@ class Agent:
 
     def chat(self, user_input: str, on_token=None, on_tool=None) -> str:
         """Process one user message. May involve multiple LLM/tool rounds."""
+        self.harness.start_chat(user_input)
         self.messages.append({"role": "user", "content": user_input})
         # 在把完整历史发给模型前，先做上下文治理，避免 messages 太长导致超过模型上下文窗口。
-        self.context.maybe_compress(self.messages, self.llm)
+        self.harness.compress_context_if_needed(self.context, self.messages, self.llm)
 
-        for _ in range(self.max_rounds):
-            resp = self.llm.chat(
-                messages=self._full_messages(),
-                tools=self._tool_schemas(),
-                # on_token=on_token 是在把流式输出处理函数透传给模型层，让模型每生成一段内容就能实时显示到终端。
-                on_token=on_token,
+        for round_index in range(1, self.max_rounds + 1):
+            self.harness.record_round_start(round_index, self.max_rounds, len(self.messages))
+            resp = self.harness.run_llm_call(
+                lambda: self.llm.chat(
+                    messages=self._full_messages(),
+                    tools=self._tool_schemas(),
+                    # on_token=on_token 是在把流式输出处理函数透传给模型层，让模型每生成一段内容就能实时显示到终端。
+                    on_token=on_token,
+                ),
+                round_index=round_index,
             )
 
             # no tool calls -> LLM is done, return text
             if not resp.tool_calls:
                 self.messages.append(resp.message)
+                self.harness.finish_chat(resp.content, reason="assistant_final")
                 return resp.content
 
             # tool calls -> execute (parallel when multiple, like Claude Code's
@@ -100,29 +113,18 @@ class Agent:
                 raise
 
             # compress if tool outputs are big
-            self.context.maybe_compress(self.messages, self.llm)
+            self.harness.compress_context_if_needed(self.context, self.messages, self.llm)
 
-        return "(reached maximum tool-call rounds)"
+        result = "(reached maximum tool-call rounds)"
+        self.harness.finish_chat(result, reason="max_rounds")
+        return result
 
     def _exec_tool(self, tc) -> str:
         """Execute a single tool call, returning the result string."""
         tool = self._tool_by_name.get(tc.name)
         if tool is None:
             return f"Error: unknown tool '{tc.name}'"
-        # validate arguments first so a TypeError raised *inside* the tool isn't
-        # mislabelled as a bad-arguments error from the caller
-        # 真正执行工具前，先校验模型传来的参数能不能匹配工具函数签名 ：如果匹配不上，就返回错误信息。
-        try:
-            # 拿到工具execute()方法的参数定义。
-            # 把模型生成的参数字典展开，尝试绑定到这个函数签名上。
-            inspect.signature(tool.execute).bind(**tc.arguments)
-        except TypeError as e:
-            return f"Error: bad arguments for {tc.name}: {e}"
-        # a tool that blows up gets reported back as text, never kills the loop
-        try:
-            return tool.execute(**tc.arguments)
-        except Exception as e:  # noqa: BLE001
-            return f"Error executing {tc.name}: {e}"
+        return self.harness.execute_tool_call(tool, tc)
 
     def _exec_tools_parallel(self, tool_calls, on_tool=None) -> list[str]:
         """Run multiple tool calls concurrently using threads.
@@ -162,4 +164,7 @@ class Agent:
 
     def reset(self):
         """Clear conversation history."""
+        self.harness.tracer.record("context", "agent", "conversation_reset", {
+            "previous_message_count": len(self.messages),
+        })
         self.messages.clear()
