@@ -9,6 +9,8 @@ from orbit.harness.sandbox import default_test_log_dir
 from orbit.harness.trace import default_trace_dir
 from orbit.llm import LLMResponse, ScriptedLLM, ToolCall
 from orbit.tools import get_tool
+from orbit.tools.base import Tool
+from orbit.tools.skill import LoadSkillTool
 
 
 @dataclass
@@ -117,6 +119,62 @@ def test_default_mode_allows_read_file_without_approval_even_for_protected_path(
     )
 
     assert "print('read only')" in result
+    assert approvals == []
+
+
+def test_default_mode_allows_tool_marked_read_only_without_approval(tmp_path):
+    approvals = []
+
+    class _ReadonlyTool(Tool):
+        name = "custom_readonly"
+        read_only = True
+        description = "Custom readonly tool"
+        parameters = {"type": "object", "properties": {}, "required": []}
+
+        def execute(self):
+            return "readonly-result"
+
+    harness = OrbitHarness(
+        HarnessConfig(
+            workspace_root=tmp_path,
+            trace_dir=tmp_path / "traces",
+            permission_mode=PermissionMode.DEFAULT,
+        ),
+        approval_callback=lambda tool, arguments, reason: approvals.append((tool, arguments, reason)) or False,
+    )
+
+    result = harness.execute_tool_call(
+        _ReadonlyTool(),
+        _ToolCall(id="c1", name="custom_readonly", arguments={}),
+    )
+
+    assert result == "readonly-result"
+    assert approvals == []
+
+
+def test_default_mode_allows_load_skill_without_approval(tmp_path):
+    skill_dir = tmp_path / "skills" / "frontend-design"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: frontend-design\ndescription: UI guidance\n---\n# Body\n",
+        encoding="utf-8",
+    )
+    approvals = []
+    harness = OrbitHarness(
+        HarnessConfig(
+            workspace_root=tmp_path,
+            trace_dir=tmp_path / "traces",
+            permission_mode=PermissionMode.DEFAULT,
+        ),
+        approval_callback=lambda tool, arguments, reason: approvals.append((tool, arguments, reason)) or False,
+    )
+
+    result = harness.execute_tool_call(
+        LoadSkillTool(tmp_path / "skills"),
+        _ToolCall(id="c1", name="load_skill", arguments={"name": "frontend-design"}),
+    )
+
+    assert "# Body" in result
     assert approvals == []
 
 

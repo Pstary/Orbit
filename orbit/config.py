@@ -32,7 +32,7 @@ def _load_dotenv():
 
 
 def _env(name: str, default: str = "") -> str:
-    legacy_name = f"CORECODER_{name.removeprefix('ORBIT_')}"
+    legacy_name = f"ORBIT_{name.removeprefix('ORBIT_')}"
     return os.getenv(name) or os.getenv(legacy_name) or default
 
 
@@ -41,7 +41,7 @@ class Config:
     model: str = "gpt-5.5"
     api_key: str = ""
     base_url: str | None = None
-    max_tokens: int = 4096
+    max_tokens: int = 8192
     temperature: float = 0.0
     max_context_tokens: int = 128_000
     provider: str = "openai"
@@ -57,6 +57,10 @@ class Config:
     mcp_config_file: str = ""
     # MCP总开关；关闭后Agent只加载内置工具，不启动任何MCP服务。
     mcp_enabled: bool = True
+    # skills目录；为空时使用默认目录发现规则。
+    skills_dir: str = ""
+    # skills总开关；关闭后不会注入技能目录，也不会暴露load_skill工具。
+    skills_enabled: bool = True
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -73,7 +77,7 @@ class Config:
             model=_env("ORBIT_MODEL", "gpt-5.5"),
             api_key=api_key,
             base_url=os.getenv("OPENAI_BASE_URL") or _env("ORBIT_BASE_URL"),
-            max_tokens=int(_env("ORBIT_MAX_TOKENS", "4096")),
+            max_tokens=int(_env("ORBIT_MAX_TOKENS", "8192")),
             temperature=float(_env("ORBIT_TEMPERATURE", "0")),
             max_context_tokens=int(_env("ORBIT_MAX_CONTEXT", "128000")),
             provider=_env("ORBIT_PROVIDER", "openai"),
@@ -88,6 +92,8 @@ class Config:
             # MCP配置从环境变量进入Config，CLI参数会在main里覆盖这里的值。
             mcp_config_file=_env("ORBIT_MCP_CONFIG_FILE", ""),
             mcp_enabled=_env("ORBIT_MCP_DISABLED", "").lower() not in {"1", "true", "yes"},
+            skills_dir=_env("ORBIT_SKILLS_DIR", ""),
+            skills_enabled=_env("ORBIT_SKILLS_DISABLED", "").lower() not in {"1", "true", "yes"},
         )
 
 

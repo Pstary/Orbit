@@ -36,6 +36,19 @@ class _Chunk:
         self.usage = usage
 
 
+class _FunctionDelta:
+    def __init__(self, name=None, arguments=None):
+        self.name = name
+        self.arguments = arguments
+
+
+class _ToolCallDelta:
+    def __init__(self, index=0, tool_id=None, name=None, arguments=None):
+        self.index = index
+        self.id = tool_id
+        self.function = _FunctionDelta(name=name, arguments=arguments)
+
+
 def _make_stream(contents, usage=None):
     """Create a fake stream from a list of content strings."""
     chunks = [_Chunk(content=c) for c in contents]
@@ -195,6 +208,45 @@ class TestChat:
         llm.chat(messages=[{"role": "user", "content": "hi"}])
         call_kwargs = self.fake.completion.call_args[1]
         assert call_kwargs["stream_options"] == {"include_usage": True}
+
+    def test_parses_split_tool_call_arguments(self):
+        llm = LLM.__new__(LLM)
+        llm.model = "x"
+        llm.extra = {}
+        llm.total_prompt_tokens = 0
+        llm.total_completion_tokens = 0
+        llm._call_with_retry = mock.MagicMock(return_value=iter([
+            _Chunk(tool_calls=[_ToolCallDelta(tool_id="c1", name="write_file", arguments='{"file_path":"ui/login.html",')]),
+            _Chunk(tool_calls=[_ToolCallDelta(arguments='"content":"<html></html>"}')]),
+            _Chunk(usage=_Usage()),
+        ]))
+
+        result = llm.chat(messages=[{"role": "user", "content": "create"}], tools=[{}])
+
+        assert result.tool_calls[0].name == "write_file"
+        assert result.tool_calls[0].arguments == {
+            "file_path": "ui/login.html",
+            "content": "<html></html>",
+        }
+        assert result.tool_calls[0].parse_error == ""
+
+    def test_invalid_tool_arguments_are_not_silently_dropped(self):
+        llm = LLM.__new__(LLM)
+        llm.model = "x"
+        llm.extra = {}
+        llm.total_prompt_tokens = 0
+        llm.total_completion_tokens = 0
+        llm._call_with_retry = mock.MagicMock(return_value=iter([
+            _Chunk(tool_calls=[_ToolCallDelta(tool_id="c1", name="write_file", arguments='{"file_path":"ui/login.html",')]),
+            _Chunk(tool_calls=[_ToolCallDelta(arguments='"content":"<html>')]),
+            _Chunk(usage=_Usage()),
+        ]))
+
+        result = llm.chat(messages=[{"role": "user", "content": "create"}], tools=[{}])
+
+        assert result.tool_calls[0].arguments == {}
+        assert result.tool_calls[0].raw_arguments.startswith('{"file_path":"ui/login.html"')
+        assert result.tool_calls[0].parse_error
 
 
 # ---------------------------------------------------------------------------

@@ -21,6 +21,8 @@ class ToolCall:
     id: str
     name: str
     arguments: dict
+    raw_arguments: str = ""
+    parse_error: str = ""
 
 # LLMResponse 是Orbit内部的“模型响应DTO”。它把外部SDK返回、流式chunk、工具调用和token统计统一封装起来，让 Agent 层只处理稳定的业务语义：模型说了什么、要调什么工具、消耗了多少token。
 @dataclass
@@ -220,18 +222,13 @@ class LLM:
                         if tc_delta.function.name:
                             tc_map[idx]["name"] = tc_delta.function.name
                         # function arguments是JSON字符串，流式返回时可能被拆碎，所以要追加拼接。
-                        if tc_delta.function.arguments:
-                            tc_map[idx]["args"] += tc_delta.function.arguments
+                        tc_map[idx]["args"] = _append_tool_arguments(
+                            tc_map[idx]["args"],
+                            tc_delta.function.arguments,
+                        )
 
-        # parse accumulated tool calls
-        parsed: list[ToolCall] = []
-        for idx in sorted(tc_map):
-            raw = tc_map[idx]
-            try:
-                args = json.loads(raw["args"])
-            except (json.JSONDecodeError, KeyError):
-                args = {}
-            parsed.append(ToolCall(id=raw["id"], name=raw["name"], arguments=args))
+        # 把聚合后的tool_call原始参数转换成字典；解析失败时保留错误，不能静默变空参。
+        parsed = _parse_tool_calls(tc_map)
 
         self.total_prompt_tokens += prompt_tok
         self.total_completion_tokens += completion_tok
@@ -369,18 +366,13 @@ class LiteLLM(LLM):
                         if tc_delta.function.name:
                             tc_map[idx]["name"] = tc_delta.function.name
                         # function arguments是JSON字符串，流式返回时可能分多段，所以持续拼接。
-                        if tc_delta.function.arguments:
-                            tc_map[idx]["args"] += tc_delta.function.arguments
+                        tc_map[idx]["args"] = _append_tool_arguments(
+                            tc_map[idx]["args"],
+                            tc_delta.function.arguments,
+                        )
 
-        # 准备把聚合后的tool_call原始数据转换成ToolCall对象列表。
-        parsed: list[ToolCall] = []
-        for idx in sorted(tc_map):
-            raw = tc_map[idx]
-            try:
-                args = json.loads(raw["args"])
-            except (json.JSONDecodeError, KeyError):
-                args = {}
-            parsed.append(ToolCall(id=raw["id"], name=raw["name"], arguments=args))
+        # 把聚合后的tool_call原始参数转换成字典；解析失败时保留错误，不能静默变空参。
+        parsed = _parse_tool_calls(tc_map)
 
         self.total_prompt_tokens += prompt_tok
         self.total_completion_tokens += completion_tok
@@ -430,3 +422,38 @@ class LiteLLM(LLM):
                 # 如果不是可恢复错误，或已经用完重试次数，就把异常抛给上层。
                 else:
                     raise
+
+
+def _append_tool_arguments(current: str, value) -> str:
+    """累积流式tool_call参数，兼容字符串和少数provider直接返回对象的情况。"""
+    if value is None:
+        return current
+    if isinstance(value, str):
+        return current + value
+    return current + json.dumps(value, ensure_ascii=False)
+
+
+def _parse_tool_calls(tc_map: dict[int, dict]) -> list[ToolCall]:
+    """把流式聚合出的tool_call转换为内部对象，解析失败时保留原始参数和错误。"""
+    parsed: list[ToolCall] = []
+    for idx in sorted(tc_map):
+        raw = tc_map[idx]
+        raw_args = str(raw.get("args", ""))
+        try:
+            args = json.loads(raw_args) if raw_args else {}
+            if not isinstance(args, dict):
+                raise ValueError("arguments JSON must be an object")
+            parse_error = ""
+        except (json.JSONDecodeError, ValueError) as exc:
+            args = {}
+            parse_error = str(exc)
+        parsed.append(
+            ToolCall(
+                id=raw.get("id", ""),
+                name=raw.get("name", ""),
+                arguments=args,
+                raw_arguments=raw_args,
+                parse_error=parse_error,
+            )
+        )
+    return parsed

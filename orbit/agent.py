@@ -56,7 +56,7 @@ class Agent:
     def _tool_schemas(self) -> list[dict]:
         return [t.schema() for t in self.tools]
 
-    def chat(self, user_input: str, on_token=None, on_tool=None) -> str:
+    def chat(self, user_input: str, on_token=None, on_tool=None, on_tool_result=None) -> str:
         """Process one user message. May involve multiple LLM/tool rounds."""
         self.harness.start_chat(user_input)
         self.messages.append({"role": "user", "content": user_input})
@@ -92,6 +92,8 @@ class Agent:
                     if on_tool:
                         on_tool(tc.name, tc.arguments)
                     result = self._exec_tool(tc)
+                    if on_tool_result:
+                        on_tool_result(tc.name, tc.arguments, result)
                     self.messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
@@ -99,7 +101,7 @@ class Agent:
                     })
                 else:
                     # parallel execution for multiple tool calls
-                    results = self._exec_tools_parallel(resp.tool_calls, on_tool)
+                    results = self._exec_tools_parallel(resp.tool_calls, on_tool, on_tool_result)
                     for tc, result in zip(resp.tool_calls, results):
                         self.messages.append({
                             "role": "tool",
@@ -124,9 +126,17 @@ class Agent:
         tool = self._tool_by_name.get(tc.name)
         if tool is None:
             return f"Error: unknown tool '{tc.name}'"
+        parse_error = getattr(tc, "parse_error", "")
+        if parse_error:
+            raw_arguments = getattr(tc, "raw_arguments", "")
+            preview = raw_arguments.replace("\n", "\\n")[:300]
+            return (
+                f"Error: invalid JSON arguments for {tc.name}: {parse_error}. "
+                f"Retry the tool call with a valid JSON object. raw_arguments_preview={preview!r}"
+            )
         return self.harness.execute_tool_call(tool, tc)
 
-    def _exec_tools_parallel(self, tool_calls, on_tool=None) -> list[str]:
+    def _exec_tools_parallel(self, tool_calls, on_tool=None, on_tool_result=None) -> list[str]:
         """Run multiple tool calls concurrently using threads.
 
         This is inspired by Claude Code's StreamingToolExecutor which starts
@@ -140,7 +150,11 @@ class Agent:
         # 这是 Agent的多工具并发执行逻辑，用线程池最多同时跑8个工具，然后按原顺序收集工具结果。
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             futures = [pool.submit(self._exec_tool, tc) for tc in tool_calls]
-            return [f.result() for f in futures]
+            results = [f.result() for f in futures]
+        if on_tool_result:
+            for tc, result in zip(tool_calls, results):
+                on_tool_result(tc.name, tc.arguments, result)
+        return results
 
     # 处理工具调用被中断后的消息补全问题。
     # 当模型在执行过程中被中断了，比如用户按下了Ctrl+C，那么模型会返回一个tool_calls消息，但是没有对应的tool reply消息。

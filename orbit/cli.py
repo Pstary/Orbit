@@ -9,6 +9,7 @@ from prompt_toolkit import prompt as pt_prompt
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
+from rich.markup import escape
 from rich.markdown import Markdown
 from rich.panel import Panel
 
@@ -18,6 +19,7 @@ from .config import Config, ConfigError, parse_config
 from .harness import OrbitHarness, HarnessConfig, PermissionMode
 from .llm import LLM, LiteLLM
 from .session import list_sessions, load_session, save_session
+from .skill_registry import default_skills_dir
 from .tools import get_default_tools
 
 console = Console()
@@ -31,6 +33,7 @@ def _parse_args():
     p.add_argument("-m", "--model", help="Model name (default: $ORBIT_MODEL or gpt-5.5)")
     p.add_argument("--base-url", help="API base URL (default: $OPENAI_BASE_URL)")
     p.add_argument("--api-key", help="API key (default: $OPENAI_API_KEY)")
+    p.add_argument("--max-tokens", type=int, help="Maximum output tokens per model call")
     p.add_argument("-p", "--prompt", help="One-shot prompt (non-interactive mode)")
     p.add_argument("--demo", action="store_true", help="Run the offline scripted demo (no API key needed)")
     p.add_argument("-r", "--resume", metavar="ID", help="Resume a saved session")
@@ -45,6 +48,8 @@ def _parse_args():
     # MCP相关参数只影响工具发现，不改变Agent主循环和Harness执行模型。
     p.add_argument("--mcp-config", help="Path to MCP server config (default: $ORBIT_MCP_CONFIG_FILE, .mcp.json, mcp.json)")
     p.add_argument("--no-mcp", action="store_true", help="Disable MCP server discovery for this run")
+    p.add_argument("--skills-dir", help="Directory containing skills/<name>/SKILL.md manifests")
+    p.add_argument("--no-skills", action="store_true", help="Disable workspace skill discovery for this run")
     p.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
     return p.parse_args()
 
@@ -69,6 +74,8 @@ def main():
         config.base_url = args.base_url
     if args.api_key:
         config.api_key = args.api_key
+    if args.max_tokens is not None:
+        config.max_tokens = args.max_tokens
     if args.permission_mode:
         config.permission_mode = args.permission_mode
     if args.workspace_root:
@@ -90,6 +97,10 @@ def main():
         config.mcp_config_file = args.mcp_config
     if args.no_mcp:
         config.mcp_enabled = False
+    if args.skills_dir:
+        config.skills_dir = args.skills_dir
+    if args.no_skills:
+        config.skills_enabled = False
 
     if not config.api_key:
         console.print("[red bold]No API key found.[/]")
@@ -123,7 +134,12 @@ def main():
     agent = harness.create_agent(
         llm=llm,
         # 创建Agent前完成MCP工具发现，让远端工具和内置工具进入同一份schema。
-        tools=get_default_tools(include_mcp=config.mcp_enabled, mcp_config_path=config.mcp_config_file or None),
+        tools=get_default_tools(
+            include_mcp=config.mcp_enabled,
+            mcp_config_path=config.mcp_config_file or None,
+            include_skills=config.skills_enabled,
+            skills_dir=_resolve_skills_dir(config),
+        ),
         max_context_tokens=config.max_context_tokens,
         max_rounds=50,
     )
@@ -186,6 +202,16 @@ def _build_harness(config: Config) -> OrbitHarness:
         approval_callback=approve,
     )
 
+
+def _resolve_skills_dir(config: Config) -> str | None:
+    if not config.skills_enabled:
+        return None
+    if config.skills_dir:
+        return str(Path(config.skills_dir).expanduser())
+    workspace_root = Path(config.workspace_root).expanduser() if config.workspace_root else Path.cwd()
+    # 默认优先读取workspace根目录skills，不存在时兼容包内orbit/skills。
+    return str(default_skills_dir(workspace_root))
+
 # _run_once() 是Orbit的非交互执行入口，负责跑一次用户prompt、实时打印模型输出、展示工具调用，并把中断或异常转换成清晰的终端退出行为。
 def _run_once(agent: Agent, prompt: str):
     """Non-interactive: run one prompt and exit."""
@@ -193,10 +219,13 @@ def _run_once(agent: Agent, prompt: str):
         print(tok, end="", flush=True)
 
     def on_tool(name, kwargs):
-        console.print(f"\n[dim]> {name}({_brief(kwargs)})[/dim]")
+        _print_tool_start(name, kwargs)
+
+    def on_tool_result(name, kwargs, result):
+        _print_tool_result(name, kwargs, result)
 
     try:
-        agent.harness.run_chat(agent, prompt, on_token=on_token, on_tool=on_tool)
+        agent.harness.run_chat(agent, prompt, on_token=on_token, on_tool=on_tool, on_tool_result=on_tool_result)
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")
         sys.exit(130)
@@ -271,6 +300,10 @@ def _repl(agent: Agent, config: Config):
         # 展示帮助面板。
         if user_input == "/help":
             _show_help()
+            continue
+        # 展示当前workspace可用skills，帮助用户知道模型能按需加载哪些专用规范。
+        if user_input == "/skills":
+            _show_skills(agent)
             continue
         # 清空当前对话历史，但保留同一个Agent实例和模型配置。
         if user_input == "/reset":
@@ -358,12 +391,22 @@ def _repl(agent: Agent, config: Config):
 
         # 工具执行前打印工具名和简略参数，给用户可观测性。
         def on_tool(name, kwargs):
-            console.print(f"\n[dim]> {name}({_brief(kwargs)})[/dim]")
+            _print_tool_start(name, kwargs)
+
+        # 工具执行后打印特殊状态。skills需要明确告诉用户是否已经加载成功。
+        def on_tool_result(name, kwargs, result):
+            _print_tool_result(name, kwargs, result)
 
         # 调用Harness顶层入口处理用户输入，内部可能经历多轮LLM调用和工具调用。
         # run_chat只在内存里追加trace事件；完整trace在用户退出REPL时由harness.close()统一落盘。
         try:
-            response = agent.harness.run_chat(agent, user_input, on_token=on_token, on_tool=on_tool)
+            response = agent.harness.run_chat(
+                agent,
+                user_input,
+                on_token=on_token,
+                on_tool=on_tool,
+                on_tool_result=on_tool_result,
+            )
             # 如果已经流式打印过内容，这里只补一个换行。
             if streamed:
                 print()
@@ -383,6 +426,7 @@ def _show_help():
     console.print(Panel(
         "[bold]Commands:[/bold]\n"
         "  /help          Show this help\n"
+        "  /skills        List available workspace skills\n"
         "  /reset         Clear conversation history\n"
         "  /model         Show current model\n"
         "  /model <name>  Switch model mid-conversation\n"
@@ -401,8 +445,68 @@ def _show_help():
     ))
 
 
+def _show_skills(agent: Agent) -> None:
+    tool = _load_skill_tool(agent)
+    if tool is None:
+        console.print("[dim]Skill loading is disabled.[/dim]")
+        return
+
+    list_skills = getattr(tool, "list_skills", None)
+    skills = list_skills() if callable(list_skills) else []
+    if not skills:
+        console.print("[dim]No workspace skills found.[/dim]")
+        return
+
+    console.print("[bold]Available skills:[/bold]")
+    for index, skill in enumerate(skills, 1):
+        name = escape(skill["name"])
+        description = escape(skill["description"])
+        console.print(f"  {index}. [cyan]{name}[/cyan]：{description}")
+
+
+def _load_skill_tool(agent: Agent):
+    for tool in agent.tools:
+        if tool.name == "load_skill":
+            return tool
+    return None
+
+
+def _print_tool_start(name: str, kwargs: dict) -> None:
+    if name == "load_skill":
+        skill_name = escape(str(kwargs.get("name") or ""))
+        console.print(f"\n[green]Skill([bold]{skill_name}[/bold])[/green]")
+        return
+    console.print(f"\n[dim]> {name}({_brief(kwargs)})[/dim]")
+
+
+def _print_tool_result(name: str, kwargs: dict, result: str) -> None:
+    del kwargs
+    if name != "load_skill":
+        # 普通工具失败时也要显式告诉用户，否则像write_file缺少参数这种问题会看起来像卡住。
+        if result.startswith(("Error:", "Blocked by harness")):
+            console.print(f"  [red]└ {escape(result)}[/red]")
+            return
+        # write_file成功后打印落盘结果，用户能直接知道文件已经创建或覆盖。
+        if name == "write_file":
+            console.print(f"  [green]└ {escape(result)}[/green]")
+        return
+    if result.startswith(("Error:", "Blocked by harness")):
+        console.print(f"  [red]└ Failed to load skill[/red] [dim]{escape(result)}[/dim]")
+        return
+    console.print("  [green]└ Successfully loaded skill[/green]")
+
+
 def _brief(kwargs: dict, maxlen: int = 80) -> str:
+    if "content" in kwargs:
+        kwargs = {
+            **kwargs,
+            "content": f"<{len(str(kwargs['content']))} chars>",
+        }
     # 把工具参数压缩成单行短文本，避免工具调用提示占满终端。
-    s = ", ".join(f"{k}={repr(v)[:40]}" for k, v in kwargs.items())
+    s = ", ".join(f"{k}={_brief_value(v)}" for k, v in kwargs.items())
     # 超过maxlen时截断并追加省略号。
     return s[:maxlen] + ("..." if len(s) > maxlen else "")
+
+
+def _brief_value(value) -> str:
+    return repr(value).replace("\n", "\\n")[:40]

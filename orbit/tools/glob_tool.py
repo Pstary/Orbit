@@ -8,6 +8,7 @@ from .base import Tool
 
 class GlobTool(Tool):
     name = "glob"
+    read_only = True
     description = (
         "Find files matching a glob pattern. "
         "Supports ** for recursive matching (e.g. '**/*.py')."

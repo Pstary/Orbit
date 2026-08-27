@@ -9,6 +9,7 @@ from .fetch import FetchUrlTool
 from .glob_tool import GlobTool
 from .grep import GrepTool
 from .read import ReadFileTool
+from .skill import LoadSkillTool
 from .write import WriteFileTool
 
 ALL_TOOLS = [
@@ -20,16 +21,34 @@ ALL_TOOLS = [
     GrepTool(),
     AgentTool(),
     FetchUrlTool(),
+    LoadSkillTool(),
 ]
 
 
-def get_default_tools(*, include_mcp: bool = True, mcp_config_path: str | None = None):
-    """返回内置工具和配置发现到的MCP工具。
+def get_default_tools(
+    *,
+    include_mcp: bool = True,
+    mcp_config_path: str | None = None,
+    include_skills: bool = True,
+    skills_dir: str | None = None,
+):
+    """返回内置工具、技能加载工具和配置发现到的MCP工具。
 
     MCP发现必须显式发生在这个函数边界，避免单纯import orbit.tools时启动外部进程。
     """
 
-    tools = list(ALL_TOOLS)
+    tools = [
+        BashTool(),
+        ReadFileTool(),
+        WriteFileTool(),
+        EditFileTool(),
+        GlobTool(),
+        GrepTool(),
+        AgentTool(),
+        FetchUrlTool(),
+    ]
+    if include_skills:
+        tools.append(LoadSkillTool(skills_dir))
     if include_mcp and os.getenv("ORBIT_MCP_DISABLED", "").lower() not in {"1", "true", "yes"}:
         # 延迟导入MCP模块，保证没有MCP配置的普通路径仍然轻量。
         from ..mcp import discover_mcp_tools

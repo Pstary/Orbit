@@ -117,6 +117,7 @@ class PolicyEngine:
         tool_name: str,
         arguments: dict[str, Any],
         *,
+        tool_read_only: bool = False,
         file_path: Path | None = None,
         command: str | None = None,
     ) -> PermissionDecision:
@@ -124,7 +125,7 @@ class PolicyEngine:
         if tool_name in self.settings.denied_tools:
             return PermissionDecision(False, reason=f"{tool_name} is explicitly denied")
 
-        is_read_only = tool_name in READ_ONLY_TOOLS or (
+        is_read_only = tool_read_only or tool_name in READ_ONLY_TOOLS or (
             tool_name == "bash" and command is not None and self._is_read_only_command(command)
         )
 

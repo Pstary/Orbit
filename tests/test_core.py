@@ -18,7 +18,7 @@ def test_public_api_exports():
     assert Agent is not None
     assert LLM is not None
     assert Config is not None
-    assert len(ALL_TOOLS) == 8
+    assert len(ALL_TOOLS) == 9
 
 
 def test_config_from_env(monkeypatch):
@@ -35,8 +35,18 @@ def test_config_defaults(monkeypatch):
 
     c = Config.from_env()
     assert c.model == "gpt-5.5"
-    assert c.max_tokens == 4096
+    assert c.max_tokens == 8192
     assert c.temperature == 0.0
+
+
+def test_system_prompt_guides_large_file_writes():
+    from orbit.prompt import system_prompt
+
+    prompt = system_prompt([])
+
+    assert "write_file creates parent directories" in prompt
+    assert "Keep file writes small" in prompt
+    assert "invalid JSON arguments" in prompt
 
 
 # --- Context ---
@@ -275,6 +285,23 @@ def test_exec_tool_distinguishes_bad_args_from_internal_error():
     assert "bad arguments" in agent._exec_tool(_BadArgs())
     assert "Error executing boom" in agent._exec_tool(_Good())
     assert "bad arguments" not in agent._exec_tool(_Good())
+
+
+def test_exec_tool_reports_tool_argument_parse_error_before_binding():
+    from orbit.llm import ToolCall
+
+    agent = Agent(llm=LLM.__new__(LLM), tools=[get_tool("write_file")])
+    result = agent._exec_tool(ToolCall(
+        id="c1",
+        name="write_file",
+        arguments={},
+        raw_arguments='{"file_path":"ui/login.html",',
+        parse_error="Expecting property name enclosed in double quotes",
+    ))
+
+    assert "invalid JSON arguments for write_file" in result
+    assert "missing a required argument" not in result
+    assert "ui/login.html" in result
 
 
 def test_interrupt_backfills_missing_tool_replies():

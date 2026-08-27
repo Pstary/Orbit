@@ -6,6 +6,7 @@ from .base import Tool
 
 class FetchUrlTool(Tool):
     name = "fetch_url"
+    read_only = True
     description = (
         "Fetch the text content of an http(s) URL. "
         "Use this to read documentation, API responses, or web pages."

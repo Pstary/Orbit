@@ -112,13 +112,13 @@ class OrbitHarness:
         })
         return context
 
-    def run_chat(self, agent, user_input: str, on_token=None, on_tool=None) -> str:
+    def run_chat(self, agent, user_input: str, on_token=None, on_tool=None, on_tool_result=None) -> str:
         self.tracer.record("execution", "harness.core", "execution_started", {
             "input_chars": len(user_input),
             "state": self.state.snapshot(),
         })
         try:
-            return agent.chat(user_input, on_token=on_token, on_tool=on_tool)
+            return agent.chat(user_input, on_token=on_token, on_tool=on_tool, on_tool_result=on_tool_result)
         except Exception as exc:
             self.tracer.record_error("execution", "harness.core", "execution_failed", exc)
             raise
@@ -238,6 +238,7 @@ class OrbitHarness:
         normalized_path = self._resolve_tool_path(arguments)
         command = arguments.get("command") if isinstance(arguments.get("command"), str) else None
         payload = {
+            "tool": tool,
             "tool_name": tool_name,
             "tool_call_id": getattr(tool_call, "id", ""),
             "arguments": arguments,
@@ -415,6 +416,7 @@ class OrbitHarness:
         decision = self.policy.evaluate(
             tool_name,
             arguments,
+            tool_read_only=bool(getattr(payload.get("tool"), "read_only", False)),
             file_path=normalized_path if isinstance(normalized_path, Path) else None,
             command=command,
         )
