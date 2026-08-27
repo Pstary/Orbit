@@ -36,6 +36,12 @@ class HarnessConfig:
     max_retries: int = 0
     sandbox_backend: str = "local"
     docker_image: str = "python:3.13-slim"
+    docker_network_enabled: bool = False
+    docker_cpus: float = 1.0
+    docker_memory: str = "512m"
+    docker_pids_limit: int = 256
+    docker_read_only_rootfs: bool = True
+    docker_seccomp_profile: str = ""
 
 
 class OrbitHarness:
@@ -66,6 +72,12 @@ class OrbitHarness:
             SandboxConfig(
                 backend=self.config.sandbox_backend,
                 docker_image=self.config.docker_image,
+                network_enabled=self.config.docker_network_enabled,
+                cpu_limit=self.config.docker_cpus,
+                memory_limit=self.config.docker_memory,
+                pids_limit=self.config.docker_pids_limit,
+                read_only_rootfs=self.config.docker_read_only_rootfs,
+                seccomp_profile=self.config.docker_seccomp_profile,
                 test_log_dir=self.config.test_log_dir,
             ),
             workspace_root=self.workspace_root,
@@ -77,6 +89,13 @@ class OrbitHarness:
             "tool_timeout_seconds": self.config.tool_timeout_seconds,
             "max_retries": self.config.max_retries,
             "sandbox_backend": self.config.sandbox_backend,
+            "docker_image": self.config.docker_image,
+            "docker_network_enabled": self.config.docker_network_enabled,
+            "docker_cpus": self.config.docker_cpus,
+            "docker_memory": self.config.docker_memory,
+            "docker_pids_limit": self.config.docker_pids_limit,
+            "docker_read_only_rootfs": self.config.docker_read_only_rootfs,
+            "docker_seccomp_profile": self.config.docker_seccomp_profile,
             "trace_dir": str(self.tracer.trace_dir),
             "test_log_dir": str(self.config.test_log_dir) if self.config.test_log_dir else None,
         })

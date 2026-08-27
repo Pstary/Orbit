@@ -45,6 +45,12 @@ def _parse_args():
     p.add_argument("--max-retries", type=int, help="Maximum retries for failed tool execution")
     p.add_argument("--sandbox", choices=["local", "docker"], help="Harness sandbox backend")
     p.add_argument("--docker-image", help="Docker image used by the docker sandbox backend")
+    p.add_argument("--docker-network", action="store_true", help="Enable network access inside Docker sandbox")
+    p.add_argument("--docker-cpus", type=float, help="CPU limit for Docker sandbox")
+    p.add_argument("--docker-memory", help="Memory limit for Docker sandbox, e.g. 512m or 2g")
+    p.add_argument("--docker-pids-limit", type=int, help="Process limit for Docker sandbox")
+    p.add_argument("--docker-writable-rootfs", action="store_true", help="Disable Docker read-only root filesystem")
+    p.add_argument("--docker-seccomp-profile", help="Path to a custom Docker seccomp profile")
     # MCP相关参数只影响工具发现，不改变Agent主循环和Harness执行模型。
     p.add_argument("--mcp-config", help="Path to MCP server config (default: $ORBIT_MCP_CONFIG_FILE, .mcp.json, mcp.json)")
     p.add_argument("--no-mcp", action="store_true", help="Disable MCP server discovery for this run")
@@ -92,6 +98,18 @@ def main():
         config.sandbox_backend = args.sandbox
     if args.docker_image:
         config.docker_image = args.docker_image
+    if args.docker_network:
+        config.docker_network_enabled = True
+    if args.docker_cpus is not None:
+        config.docker_cpus = args.docker_cpus
+    if args.docker_memory:
+        config.docker_memory = args.docker_memory
+    if args.docker_pids_limit is not None:
+        config.docker_pids_limit = args.docker_pids_limit
+    if args.docker_writable_rootfs:
+        config.docker_read_only_rootfs = False
+    if args.docker_seccomp_profile:
+        config.docker_seccomp_profile = args.docker_seccomp_profile
     # CLI显式参数优先级高于环境变量里的MCP配置。
     if args.mcp_config:
         config.mcp_config_file = args.mcp_config
@@ -198,6 +216,12 @@ def _build_harness(config: Config) -> OrbitHarness:
             max_retries=config.max_retries,
             sandbox_backend=config.sandbox_backend,
             docker_image=config.docker_image,
+            docker_network_enabled=config.docker_network_enabled,
+            docker_cpus=config.docker_cpus,
+            docker_memory=config.docker_memory,
+            docker_pids_limit=config.docker_pids_limit,
+            docker_read_only_rootfs=config.docker_read_only_rootfs,
+            docker_seccomp_profile=config.docker_seccomp_profile,
         ),
         approval_callback=approve,
     )

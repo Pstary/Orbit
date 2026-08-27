@@ -6,6 +6,7 @@ import shlex
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from os import getgid, getuid
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -32,6 +33,9 @@ class SandboxConfig:
     network_enabled: bool = False
     cpu_limit: float = 1.0
     memory_limit: str = "512m"
+    pids_limit: int = 256
+    read_only_rootfs: bool = True
+    seccomp_profile: str = ""
     extra_mounts: list[str] = field(default_factory=list)
     test_log_dir: Path | None = None
 
@@ -80,24 +84,45 @@ class SandboxRunner:
             str(self.config.cpu_limit),
             "--memory",
             self.config.memory_limit,
+            "--pids-limit",
+            str(self.config.pids_limit),
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--user",
+            f"{getuid()}:{getgid()}",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,noexec,size=64m",
+            "--tmpfs",
+            "/run:rw,nosuid,nodev,noexec,size=16m",
             "-v",
             f"{root}:{root}:rw",
             "-w",
             root,
         ]
+        if self.config.read_only_rootfs:
+            argv.append("--read-only")
+        if self.config.seccomp_profile:
+            argv.extend(["--security-opt", f"seccomp={self.config.seccomp_profile}"])
         for mount in self.config.extra_mounts:
             argv.extend(["-v", mount])
         argv.extend([self.config.docker_image, "bash", "-lc", command])
 
-        proc = subprocess.run(
-            argv,
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-        )
+        try:
+            proc = subprocess.run(
+                argv,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+            )
+        except FileNotFoundError:
+            return "Error: docker executable not found. Install Docker and ensure `docker` is on PATH."
+        except subprocess.TimeoutExpired:
+            return f"Error: timed out after {timeout}s"
         output = _format_process_output(proc.stdout, proc.stderr, proc.returncode)
         self._write_test_log_if_needed(command, proc.stdout, proc.stderr, proc.returncode, output)
         return output

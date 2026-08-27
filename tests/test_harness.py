@@ -1,11 +1,13 @@
 """Tests for the Orbit harness layer."""
 
 import json
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from unittest import mock
 
 from orbit.harness import OrbitHarness, HarnessConfig, HookEvent, HookResult, PermissionMode
-from orbit.harness.sandbox import default_test_log_dir
+from orbit.harness.sandbox import SandboxConfig, SandboxRunner, default_test_log_dir
 from orbit.harness.trace import default_trace_dir
 from orbit.llm import LLMResponse, ScriptedLLM, ToolCall
 from orbit.tools import get_tool
@@ -283,3 +285,66 @@ def test_bash_test_command_writes_test_log(tmp_path):
 
     trace = json.loads(trace_path.read_text(encoding="utf-8"))
     assert "test_log_saved" in [event["action"] for event in trace["events"]]
+
+
+def test_docker_sandbox_uses_container_isolation_flags(tmp_path):
+    runner = SandboxRunner(
+        SandboxConfig(
+            backend="docker",
+            docker_image="python:3.13-slim",
+            network_enabled=False,
+            cpu_limit=0.5,
+            memory_limit="256m",
+            pids_limit=64,
+            read_only_rootfs=True,
+            seccomp_profile="/tmp/seccomp.json",
+        ),
+        workspace_root=tmp_path,
+    )
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="ok\n", stderr="")
+
+    with mock.patch("orbit.harness.sandbox.subprocess.run", return_value=completed) as run:
+        assert runner.run_bash("echo ok", timeout=7) == "ok"
+
+    argv = run.call_args.args[0]
+    assert argv[:2] == ["docker", "run"]
+    assert "--rm" in argv
+    assert "--network" in argv
+    assert argv[argv.index("--network") + 1] == "none"
+    assert "--cap-drop" in argv
+    assert argv[argv.index("--cap-drop") + 1] == "ALL"
+    assert "--security-opt" in argv
+    assert "no-new-privileges" in argv
+    assert "seccomp=/tmp/seccomp.json" in argv
+    assert "--pids-limit" in argv
+    assert argv[argv.index("--pids-limit") + 1] == "64"
+    assert "--cpus" in argv
+    assert argv[argv.index("--cpus") + 1] == "0.5"
+    assert "--memory" in argv
+    assert argv[argv.index("--memory") + 1] == "256m"
+    assert "--read-only" in argv
+    assert "/tmp:rw,nosuid,nodev,noexec,size=64m" in argv
+    assert f"{tmp_path.resolve()}:{tmp_path.resolve()}:rw" in argv
+
+
+def test_harness_passes_docker_config_to_sandbox(tmp_path):
+    harness = OrbitHarness(HarnessConfig(
+        workspace_root=tmp_path,
+        trace_dir=tmp_path / "traces",
+        sandbox_backend="docker",
+        docker_image="python:3.13-slim",
+        docker_network_enabled=True,
+        docker_cpus=2.0,
+        docker_memory="1g",
+        docker_pids_limit=128,
+        docker_read_only_rootfs=False,
+        docker_seccomp_profile="/tmp/seccomp.json",
+    ))
+
+    assert harness.sandbox.config.backend == "docker"
+    assert harness.sandbox.config.network_enabled is True
+    assert harness.sandbox.config.cpu_limit == 2.0
+    assert harness.sandbox.config.memory_limit == "1g"
+    assert harness.sandbox.config.pids_limit == 128
+    assert harness.sandbox.config.read_only_rootfs is False
+    assert harness.sandbox.config.seccomp_profile == "/tmp/seccomp.json"
