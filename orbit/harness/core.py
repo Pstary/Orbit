@@ -15,12 +15,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..context import ContextManager, estimate_tokens
+from ..llm import cost_for_model
 from ..tools.base import Tool
 from .hooks import HookEvent, HookManager, HookResult
 from .permissions import PermissionMode, PermissionSettings, PolicyEngine
 from .sandbox import SandboxConfig, SandboxRunner, validate_workspace_path
 from .state import HarnessState
-from .trace import TraceRecorder
+from .trace import TraceRecorder, truncate_for_trace
 
 
 ApprovalCallback = Callable[[str, dict[str, Any], str], bool]
@@ -42,6 +43,8 @@ class HarnessConfig:
     docker_pids_limit: int = 256
     docker_read_only_rootfs: bool = True
     docker_seccomp_profile: str = ""
+    # 记忆目录；None时记忆模块默认使用 workspace_root/.memory。
+    memory_dir: Path | None = None
 
 
 class OrbitHarness:
@@ -55,6 +58,12 @@ class OrbitHarness:
     ):
         self.config = config or HarnessConfig()
         self.workspace_root = Path(self.config.workspace_root).expanduser().resolve()
+        # 记忆目录：显式配置优先，否则默认 <workspace>/.memory（由MemoryManager处理None）。
+        self.memory_dir = (
+            Path(self.config.memory_dir).expanduser().resolve()
+            if self.config.memory_dir
+            else None
+        )
         self.tracer = tracer or TraceRecorder(self.config.trace_dir)
         self.approval_callback = approval_callback
         self._contexts: list[int] = []
@@ -67,6 +76,7 @@ class OrbitHarness:
         self.policy = PolicyEngine(
             PermissionSettings(mode=self.config.permission_mode),
             workspace_root=self.workspace_root,
+            sandbox_backend=self.config.sandbox_backend,
         )
         self.sandbox = SandboxRunner(
             SandboxConfig(
@@ -105,13 +115,15 @@ class OrbitHarness:
     def default(cls) -> "OrbitHarness":
         return cls(HarnessConfig(permission_mode=PermissionMode.FULL_AUTO))
 
-    def create_agent(self, llm, tools=None, max_context_tokens: int = 128_000, max_rounds: int = 50):
+    def create_agent(self, llm, tools=None, max_context_tokens: int = 128_000, max_rounds: int = 50,
+                     memory_enabled: bool = True):
         from ..agent import Agent
 
         self.tracer.record("agent", "harness.core", "create_agent", {
             "max_context_tokens": max_context_tokens,
             "max_rounds": max_rounds,
             "tool_count": len(tools) if tools is not None else None,
+            "memory_enabled": memory_enabled,
         })
         return Agent(
             llm=llm,
@@ -119,6 +131,7 @@ class OrbitHarness:
             max_context_tokens=max_context_tokens,
             max_rounds=max_rounds,
             harness=self,
+            memory_enabled=memory_enabled,
         )
 
     def create_context(self, max_tokens: int) -> ContextManager:
@@ -132,17 +145,24 @@ class OrbitHarness:
         return context
 
     def run_chat(self, agent, user_input: str, on_token=None, on_tool=None, on_tool_result=None) -> str:
+        started = time.monotonic()
         self.tracer.record("execution", "harness.core", "execution_started", {
             "input_chars": len(user_input),
+            # 用户 query 原文（超长截断），trace 的核心字段之一。
+            "user_query": truncate_for_trace(user_input),
             "state": self.state.snapshot(),
         })
         try:
             return agent.chat(user_input, on_token=on_token, on_tool=on_tool, on_tool_result=on_tool_result)
         except Exception as exc:
-            self.tracer.record_error("execution", "harness.core", "execution_failed", exc)
+            self.tracer.record_error("execution", "harness.core", "execution_failed", exc, {
+                "duration_ms": _elapsed_ms(started),
+            })
             raise
         finally:
-            self.tracer.record("execution", "harness.core", "execution_finished")
+            self.tracer.record("execution", "harness.core", "execution_finished", {
+                "state": self.state.snapshot(),
+            }, duration_ms=_elapsed_ms(started))
 
     def start_chat(self, user_input: str) -> None:
         self.state.current_input = user_input
@@ -153,6 +173,7 @@ class OrbitHarness:
         })
         self.tracer.record("chat", "agent", "chat_started", {
             "input_chars": len(user_input),
+            "user_query": truncate_for_trace(user_input),
         })
 
     def finish_chat(self, result: str, *, reason: str) -> None:
@@ -164,6 +185,8 @@ class OrbitHarness:
         self.tracer.record("chat", "agent", "chat_finished", {
             "reason": reason,
             "result_chars": len(result),
+            # 任务最终输出（截断），配合 reason 标记任务结束状态（正常收尾/达到最大轮数）。
+            "result_preview": truncate_for_trace(result, 2000),
             "state": self.state.snapshot(),
         })
 
@@ -177,9 +200,12 @@ class OrbitHarness:
 
     def compress_context_if_needed(self, context: ContextManager, messages: list[dict], llm) -> bool:
         before_tokens = estimate_tokens(messages)
+        before_message_count = len(messages)
         self.tracer.record("context", "harness.context", "context_compress_check_started", {
             "message_count": len(messages),
             "estimated_tokens": before_tokens,
+            "max_tokens": context.max_tokens,
+            "window_usage_pct": round(before_tokens / context.max_tokens * 100, 1) if context.max_tokens else None,
         })
         started = time.monotonic()
         compressed = False
@@ -190,15 +216,25 @@ class OrbitHarness:
             self.tracer.record_error("context", "harness.context", "context_compress_failed", exc)
             raise
         finally:
+            after_tokens = estimate_tokens(messages)
+            report = getattr(context, "last_compression", None) or {}
             self.tracer.record("context", "harness.context", "context_compress_check_finished", {
                 "context_id": id(context),
                 "message_count": len(messages),
-                "estimated_tokens": estimate_tokens(messages),
+                "message_count_before": before_message_count,
+                "estimated_tokens": after_tokens,
+                "tokens_before": before_tokens,
+                "tokens_after": after_tokens,
+                "tokens_freed": max(0, before_tokens - after_tokens),
                 "compressed": compressed,
+                # 触发了哪些压缩层（tool_snip / summarize / hard_collapse），上下文变化的具体原因。
+                "compression_layers": report.get("layers", []),
             }, duration_ms=_elapsed_ms(started))
             self.tracer.record("context", "harness.context", "context_updated", {
                 "context_id": id(context),
                 "message_count": len(messages),
+                "estimated_tokens": after_tokens,
+                "tokens_before": before_tokens,
             })
             self.hooks.trigger(HookEvent.CONTEXT_UPDATE, {
                 "context_id": id(context),
@@ -213,31 +249,77 @@ class OrbitHarness:
             "max_tokens": context.max_tokens,
         })
 
-    def run_llm_call(self, call: Callable[[], Any], *, round_index: int) -> Any:
+    def run_llm_call(self, call: Callable[[], Any], *, round_index: int, llm: Any = None) -> Any:
         pre_result = self.hooks.trigger(HookEvent.PRE_LLM_CALL, {
             "round": round_index,
             "state": self.state.snapshot(),
         })
         if pre_result.blocked:
             raise RuntimeError(pre_result.reason or "PreLLMCall hook blocked LLM call")
-        self.tracer.record("llm", "agent", "llm_call_started", {"round": round_index})
+        model_name = getattr(llm, "model", None) if llm is not None else None
+        self.tracer.record("llm", "agent", "llm_call_started", {
+            "round": round_index,
+            "model": model_name,
+        })
         started = time.monotonic()
         try:
             result = call()
+            tool_calls = getattr(result, "tool_calls", []) or []
+            content = getattr(result, "content", "") or ""
+            prompt_tokens = int(getattr(result, "prompt_tokens", 0) or 0)
+            completion_tokens = int(getattr(result, "completion_tokens", 0) or 0)
+            # 累计 token 到 harness 状态，state snapshot 随时可查（主循环口径）。
+            self.state.total_prompt_tokens += prompt_tokens
+            self.state.total_completion_tokens += completion_tokens
+            # 单次调用费用（模型不在定价表时为 None）。
+            call_cost = cost_for_model(model_name, prompt_tokens, completion_tokens) if model_name else None
+            # 累计口径优先取 LLM 自身计数（与 /tokens 展示、实际计费一致，含记忆辅助调用），
+            # 离线/无计数对象回退到 harness state。
+            total_cost = getattr(llm, "estimated_cost", None) if llm is not None else None
+            cum_prompt = int(getattr(llm, "total_prompt_tokens", 0) or 0) if llm is not None else 0
+            cum_completion = int(getattr(llm, "total_completion_tokens", 0) or 0) if llm is not None else 0
+            if not cum_prompt and not cum_completion:
+                cum_prompt = self.state.total_prompt_tokens
+                cum_completion = self.state.total_completion_tokens
             self.hooks.trigger(HookEvent.POST_LLM_CALL, {
                 "round": round_index,
-                "tool_call_count": len(getattr(result, "tool_calls", []) or []),
-                "content_chars": len(getattr(result, "content", "") or ""),
+                "tool_call_count": len(tool_calls),
+                "content_chars": len(content),
                 "state": self.state.snapshot(),
             })
             self.tracer.record("llm", "agent", "llm_call_finished", {
                 "round": round_index,
-                "tool_call_count": len(getattr(result, "tool_calls", []) or []),
-                "content_chars": len(getattr(result, "content", "") or ""),
+                "model": model_name,
+                # LLM 本轮输出正文（截断）：这是"每轮 LLM 决策与输出"的核心证据。
+                "content_preview": truncate_for_trace(content),
+                "content_chars": len(content),
+                # LLM 本轮决策：要调用哪些工具、入参是什么（参数脱敏）、参数解析是否失败。
+                "tool_call_count": len(tool_calls),
+                "tool_calls": [
+                    {
+                        "id": getattr(tc, "id", ""),
+                        "name": getattr(tc, "name", ""),
+                        "arguments": _redact_arguments(dict(getattr(tc, "arguments", {}) or {})),
+                        "parse_error": getattr(tc, "parse_error", "") or None,
+                    }
+                    for tc in tool_calls
+                ],
+                # token 用量：单次 + 累计（累计为 LLM 全口径计数，含记忆辅助调用）。
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_prompt_tokens": cum_prompt,
+                "total_completion_tokens": cum_completion,
+                "call_cost_usd": round(call_cost, 6) if call_cost is not None else None,
+                "estimated_cost_usd": round(total_cost, 6) if isinstance(total_cost, (int, float)) else None,
+                "state": self.state.snapshot(),
             }, duration_ms=_elapsed_ms(started))
             return result
         except Exception as exc:
-            self.tracer.record_error("llm", "agent", "llm_call_failed", exc, {"round": round_index})
+            self.tracer.record_error("llm", "agent", "llm_call_failed", exc, {
+                "round": round_index,
+                "model": model_name,
+                "duration_ms": _elapsed_ms(started),
+            })
             raise
 
     def execute_tool_call(self, tool: Tool, tool_call) -> str:
@@ -252,6 +334,7 @@ class OrbitHarness:
 
         bind_error = self._validate_arguments(tool, arguments)
         if bind_error:
+            self._record_tool_result(tool_name, tool_call, bind_error, status="error")
             return bind_error
 
         normalized_path = self._resolve_tool_path(arguments)
@@ -269,8 +352,11 @@ class OrbitHarness:
         blocked = self.hooks.trigger(HookEvent.PRE_TOOL_USE, payload)
         if blocked.blocked:
             if blocked.reason.startswith("approval denied: "):
-                return f"Blocked by harness approval: {blocked.reason.removeprefix('approval denied: ')}"
-            return f"Blocked by harness: {blocked.reason}"
+                output = f"Blocked by harness approval: {blocked.reason.removeprefix('approval denied: ')}"
+            else:
+                output = f"Blocked by harness: {blocked.reason}"
+            self._record_tool_result(tool_name, tool_call, output, status="blocked")
+            return output
 
         output = self._execute_with_retry(tool, arguments)
         self.hooks.trigger(HookEvent.POST_TOOL_USE, {
@@ -279,7 +365,25 @@ class OrbitHarness:
             "output_chars": len(output),
             "state": self.state.snapshot(),
         })
+        # 工具返回结果（截断）：Error 开头说明工具执行失败，按 error 状态记录。
+        self._record_tool_result(
+            tool_name,
+            tool_call,
+            output,
+            status="error" if output.startswith("Error") else "ok",
+        )
         return output
+
+    def _record_tool_result(self, tool_name: str, tool_call, output: str, *, status: str) -> None:
+        """记录工具调用的最终返回结果（含被拦截/参数错误/执行失败）。"""
+        self.tracer.record("tool", "harness.core", "tool_call_completed", {
+            "tool_name": tool_name,
+            "tool_call_id": getattr(tool_call, "id", ""),
+            "output_chars": len(output),
+            # 工具返回结果原文（超长截断，头尾保留——报错信息常在尾部）。
+            "output_preview": truncate_for_trace(output),
+            "state": self.state.snapshot(),
+        }, status=status)
 
     def _validate_arguments(self, tool: Tool, arguments: dict[str, Any]) -> str:
         try:
@@ -444,6 +548,10 @@ class OrbitHarness:
             "allowed": decision.allowed,
             "requires_approval": decision.requires_approval,
             "reason": decision.reason,
+            # bash 命令四级风险分级结果（LOW/MEDIUM/HIGH/CRITICAL + 处置动作 + 命中规则）。
+            "risk_level": decision.risk_level,
+            "risk_action": decision.risk_action,
+            "risk_reasons": list(decision.risk_reasons),
         }, status="ok" if decision.allowed else ("approval_required" if decision.requires_approval else "blocked"))
 
         if decision.allowed:

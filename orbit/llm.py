@@ -86,6 +86,22 @@ _PRICING = {
     "kimi-k2.5": (0.6, 3),
 }
 
+
+def cost_for_model(model: str, prompt_tokens: int, completion_tokens: int) -> float | None:
+    """按定价表估算单次调用费用（USD）；模型不在定价表时返回 None。
+
+    抽成模块级公开函数，方便 harness/trace 层在不依赖 LLM 实例的情况下
+    记录每次调用的费用与累计费用。
+    """
+    pricing = _PRICING.get(model)
+    if not pricing:
+        return None
+    input_rate, output_rate = pricing
+    return (
+        prompt_tokens * input_rate / 1_000_000
+        + completion_tokens * output_rate / 1_000_000
+    )
+
 # 用固定脚本模拟真实模型，让Agent主循环、工具调用、测试用例可以在没有API key、没有网络、结果可复现的情况下运行。
 class ScriptedLLM:
     """Deterministic offline LLM for demos and smoke tests.
@@ -97,11 +113,21 @@ class ScriptedLLM:
 
     total_prompt_tokens = 0
     total_completion_tokens = 0
+    # 标记这是离线脚本模型：记忆等辅助LLM调用不应消费脚本turn，否则会打乱demo/测试的预设流程。
+    scripted = True
 
     def __init__(self, script: list[LLMResponse], model: str = "scripted-demo"):
         # 保存一份预设回复脚本，每次chat()按顺序取出一条，避免修改调用方传入的原始列表。
         self._turns = list(script)
         self.model = model
+        # 实例级累计计数器（类属性仅作为默认值/接口约定）。
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
+
+    @property
+    def estimated_cost(self) -> float | None:
+        """与真实 LLM 保持同一接口：按定价表估算累计费用（脚本模型通常不在表内，返回 None）。"""
+        return cost_for_model(self.model, self.total_prompt_tokens, self.total_completion_tokens)
 
     def chat(self, messages, tools=None, on_token=None) -> LLMResponse:
         # 脚本耗尽说明测试流程超出了预期轮数，直接报错比静默返回更容易暴露主循环问题。
@@ -112,8 +138,23 @@ class ScriptedLLM:
         # 如果外层传了on_token回调，就把完整文本一次性推给它，模拟流式输出。
         if on_token and resp.content:
             on_token(resp.content)
-        # 离线模型没有真实usage，这里用空格分词粗略累加completion token，供/tokens等展示使用。
-        self.total_completion_tokens += len(resp.content.split())
+        # 脚本没有显式给 usage 时做粗略估算并回填响应，让离线 demo/测试的 trace
+        # 中「单次 token」与「累计 token」口径一致：
+        #   completion 按空格分词估算，prompt 按输入消息字符数约 1 token/4 字符估算。
+        if not resp.completion_tokens and resp.content:
+            resp.completion_tokens = len(resp.content.split())
+        if not resp.prompt_tokens:
+            prompt_chars = 0
+            for msg in messages or []:
+                content = getattr(msg, "content", None)
+                if content is None and isinstance(msg, dict):
+                    content = msg.get("content")
+                if isinstance(content, str):
+                    prompt_chars += len(content)
+            if prompt_chars:
+                resp.prompt_tokens = max(1, prompt_chars // 4)
+        self.total_prompt_tokens += resp.prompt_tokens
+        self.total_completion_tokens += resp.completion_tokens
         return resp
 
 # 这是默认模型客户端，基于OpenAISDK，支持所有OpenAI-compatible接口
@@ -134,14 +175,7 @@ class LLM:
     @property
     def estimated_cost(self) -> float | None:
         """Rough cost estimate in USD. Returns None if model not in pricing table."""
-        pricing = _PRICING.get(self.model)
-        if not pricing:
-            return None
-        input_rate, output_rate = pricing
-        return (
-            self.total_prompt_tokens * input_rate / 1_000_000
-            + self.total_completion_tokens * output_rate / 1_000_000
-        )
+        return cost_for_model(self.model, self.total_prompt_tokens, self.total_completion_tokens)
 
     def chat(
         self,

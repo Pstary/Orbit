@@ -52,6 +52,8 @@ class AgentTool(Tool):
             max_context_tokens=parent.context.max_tokens,
             max_rounds=20,
             harness=parent.harness,
+            # 子Agent是一次性调研/执行上下文，不召回也不写入长期记忆，避免额外LLM调用和记忆污染。
+            memory_enabled=False,
         )
 
         # 子Agent失败只返回文本错误，不把异常继续抛给父Agent。

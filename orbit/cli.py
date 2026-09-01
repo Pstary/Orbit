@@ -56,6 +56,8 @@ def _parse_args():
     p.add_argument("--no-mcp", action="store_true", help="Disable MCP server discovery for this run")
     p.add_argument("--skills-dir", help="Directory containing skills/<name>/SKILL.md manifests")
     p.add_argument("--no-skills", action="store_true", help="Disable workspace skill discovery for this run")
+    p.add_argument("--memory-dir", help="Directory for persistent memory records (default: <workspace>/.memory)")
+    p.add_argument("--no-memory", action="store_true", help="Disable cross-session memory recall and extraction")
     p.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
     return p.parse_args()
 
@@ -119,6 +121,10 @@ def main():
         config.skills_dir = args.skills_dir
     if args.no_skills:
         config.skills_enabled = False
+    if args.memory_dir:
+        config.memory_dir = args.memory_dir
+    if args.no_memory:
+        config.memory_enabled = False
 
     if not config.api_key:
         console.print("[red bold]No API key found.[/]")
@@ -160,7 +166,12 @@ def main():
         ),
         max_context_tokens=config.max_context_tokens,
         max_rounds=50,
+        memory_enabled=config.memory_enabled,
     )
+
+    # 记忆的召回/提取是隐藏的LLM调用，远程模型上可能耗时数十秒，输出进度避免终端像卡死。
+    if getattr(agent, "memory", None) is not None:
+        agent.memory.notify = lambda msg: console.print(f"[dim][memory] {msg}[/dim]")
 
     # resume saved session
     if args.resume:
@@ -198,6 +209,7 @@ def _build_harness(config: Config) -> OrbitHarness:
     workspace_root = Path(config.workspace_root).expanduser() if config.workspace_root else Path.cwd()
     trace_dir = Path(config.trace_dir).expanduser() if config.trace_dir else None
     test_log_dir = Path(config.test_log_dir).expanduser() if config.test_log_dir else None
+    memory_dir = Path(config.memory_dir).expanduser() if config.memory_dir else None
 
     def approve(tool_name: str, arguments: dict, reason: str) -> bool:
         console.print(f"\n[yellow]Approval required:[/] {tool_name}")
@@ -222,6 +234,7 @@ def _build_harness(config: Config) -> OrbitHarness:
             docker_pids_limit=config.docker_pids_limit,
             docker_read_only_rootfs=config.docker_read_only_rootfs,
             docker_seccomp_profile=config.docker_seccomp_profile,
+            memory_dir=memory_dir,
         ),
         approval_callback=approve,
     )
@@ -262,10 +275,16 @@ def _run_once(agent: Agent, prompt: str):
 
 def _repl(agent: Agent, config: Config):
     """Interactive read-eval-print loop."""
+    memory_line = (
+        "\nMemory: [dim]disabled[/dim]"
+        if not config.memory_enabled
+        else f"\nMemory: [green]on[/green] [dim]({config.memory_dir or '<workspace>/.memory'})[/dim]"
+    )
     console.print(Panel(
         f"[bold]Orbit[/bold] v{__version__}\n"
         f"Model: [cyan]{config.model}[/cyan]"
         + (f"  Base: [dim]{config.base_url}[/dim]" if config.base_url else "")
+        + memory_line
         + "\nType [bold]/help[/bold] for commands, [bold]Ctrl+C[/bold] to cancel, [bold]quit[/bold] to exit.",
         border_style="blue",
     ))
@@ -399,6 +418,10 @@ def _repl(agent: Agent, config: Config):
                 for s in sessions:
                     console.print(f"  [cyan]{s['id']}[/cyan] ({s['model']}, {s['saved_at']}) {s['preview']}")
             continue
+        # 展示跨会话记忆状态：记忆目录和已存储的记忆条目。
+        if user_input == "/memory":
+            _show_memory(agent)
+            continue
 
         # 未知/命令不应该发给模型，直接提示用户查看/help。
         if user_input.startswith("/"):
@@ -459,6 +482,7 @@ def _show_help():
         "  /diff          Show files modified this session\n"
         "  /save          Save session to disk\n"
         "  /sessions      List saved sessions\n"
+        "  /memory        Show persistent memory store status\n"
         "  quit           Exit Orbit\n"
         "\n"
         "[bold]Input:[/bold]\n"
@@ -493,6 +517,25 @@ def _load_skill_tool(agent: Agent):
         if tool.name == "load_skill":
             return tool
     return None
+
+
+def _show_memory(agent: Agent) -> None:
+    # 记忆被禁用（如--no-memory或子Agent）时给出明确提示。
+    if agent.memory is None:
+        console.print("[dim]Persistent memory is disabled.[/dim]")
+        return
+    store = agent.memory.store
+    records = store.list_records()
+    console.print(f"Memory dir: [cyan]{store.memory_dir}[/cyan]")
+    if not records:
+        console.print("[dim]No memories stored yet. Durable preferences and project facts are saved here automatically.[/dim]")
+        return
+    console.print(f"[bold]Stored memories ({len(records)}):[/bold]")
+    for record in records:
+        name = escape(record["name"])
+        mem_type = escape(record["type"])
+        description = escape(record["description"])
+        console.print(f"  [cyan]{name}[/cyan] [dim]({mem_type})[/dim] - {description}")
 
 
 def _print_tool_start(name: str, kwargs: dict) -> None:

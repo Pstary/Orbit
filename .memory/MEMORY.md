@@ -1,0 +1,4 @@
+- [Orbit harness高风险命令审批机制](orbit-harness高风险命令审批机制.md) - Orbit项目harness模块的命令安全审批规则，高风险命令需人工审批后方可执行
+- [Orbit离线演示脚本特性](orbit离线演示脚本特性.md) - Orbit项目内置离线演示脚本orbit/demo.py的核心功能与运行特性
+- [Orbit项目本地根路径](orbit项目本地根路径.md) - 用户的Orbit Python项目在当前设备上的根目录存储路径
+- [Python代码开发规范偏好](python代码开发规范偏好.md) - 用户对其所有Python代码制定的长期开发规则，包含格式化要求和提交前测试要求

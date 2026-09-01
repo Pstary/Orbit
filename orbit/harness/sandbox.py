@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from os import getgid, getuid
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+# getuid/getgid are Unix-only; on Windows the docker backend runs as the
+# image's default user instead of mapping the host uid/gid.
+if sys.platform != "win32":
+    from os import getgid, getuid
+else:
+    getuid = None
+    getgid = None
 
 
 class SandboxError(RuntimeError):
@@ -90,8 +98,10 @@ class SandboxRunner:
             "ALL",
             "--security-opt",
             "no-new-privileges",
-            "--user",
-            f"{getuid()}:{getgid()}",
+        ]
+        if getuid is not None:
+            argv.extend(["--user", f"{getuid()}:{getgid()}"])
+        argv += [
             "--tmpfs",
             "/tmp:rw,nosuid,nodev,noexec,size=64m",
             "--tmpfs",

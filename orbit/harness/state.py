@@ -20,6 +20,9 @@ class HarnessState:
     round_count: int = 0
     tool_call_count: int = 0
     permission_check_count: int = 0
+    # 累计 token 用量（主 Agent 循环的每次 LLM 调用结束时累加）。
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
     context_ids: list[int] = field(default_factory=list)
     trace_path: Path | None = None
     closed: bool = False
@@ -33,6 +36,9 @@ class HarnessState:
             "round_count": self.round_count,
             "tool_call_count": self.tool_call_count,
             "permission_check_count": self.permission_check_count,
+            "total_prompt_tokens": self.total_prompt_tokens,
+            "total_completion_tokens": self.total_completion_tokens,
+            "total_tokens": self.total_prompt_tokens + self.total_completion_tokens,
             "context_count": len(self.context_ids),
             "trace_path": str(self.trace_path) if self.trace_path else None,
             "closed": self.closed,

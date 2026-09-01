@@ -67,6 +67,10 @@ class Config:
     skills_dir: str = ""
     # skills总开关；关闭后不会注入技能目录，也不会暴露load_skill工具。
     skills_enabled: bool = True
+    # 记忆目录；为空时使用工作区下的 .memory/。
+    memory_dir: str = ""
+    # 跨会话记忆总开关；关闭后不召回、不提取记忆。
+    memory_enabled: bool = True
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -106,6 +110,8 @@ class Config:
             mcp_enabled=_env("ORBIT_MCP_DISABLED", "").lower() not in {"1", "true", "yes"},
             skills_dir=_env("ORBIT_SKILLS_DIR", ""),
             skills_enabled=_env("ORBIT_SKILLS_DISABLED", "").lower() not in {"1", "true", "yes"},
+            memory_dir=_env("ORBIT_MEMORY_DIR", ""),
+            memory_enabled=_env("ORBIT_MEMORY_DISABLED", "").lower() not in {"1", "true", "yes"},
         )
 
 

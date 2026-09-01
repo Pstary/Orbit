@@ -75,28 +75,49 @@ class ContextManager:
         self._snip_at = int(max_tokens * 0.50)    # 50% -> snip tool outputs
         self._summarize_at = int(max_tokens * 0.70)  # 70% -> LLM summarize
         self._collapse_at = int(max_tokens * 0.90)   # 90% -> hard collapse
+        # 最近一次 maybe_compress 的压缩报告（触发了哪些层、token 前后变化），
+        # 供 harness 写入 trace；未发生压缩时为 None。
+        self.last_compression: dict | None = None
 
     def maybe_compress(self, messages: list[dict], llm: LLM | None = None) -> bool:
         """Apply compression layers as needed. Returns True if any compression happened."""
         current = estimate_tokens(messages)
+        tokens_before = current
+        layers: list[str] = []
         compressed = False
 
         # Layer 1: snip verbose tool outputs
         if current > self._snip_at and self._snip_tool_outputs(messages):
+            layers.append("tool_snip")
             compressed = True
             # 重新计算当前token数
             current = estimate_tokens(messages)
 
         # Layer 2: LLM-powered summarization of old turns
         if current > self._summarize_at and len(messages) > 10 and self._summarize_old(messages, llm, keep_recent=8):
+            layers.append("summarize")
             compressed = True
             current = estimate_tokens(messages)
 
         # Layer 3: hard collapse - last resort
         if current > self._collapse_at and len(messages) > 4:
             self._hard_collapse(messages, llm)
+            layers.append("hard_collapse")
             compressed = True
+            current = estimate_tokens(messages)
 
+        # 记录压缩报告供 trace 使用：哪一层触发、压缩前后 token 数、释放了多少。
+        self.last_compression = (
+            {
+                "layers": layers,
+                "tokens_before": tokens_before,
+                "tokens_after": current,
+                "tokens_freed": max(0, tokens_before - current),
+                "message_count_after": len(messages),
+            }
+            if compressed
+            else None
+        )
         return compressed
 
     # 这段代码遍历所有tool消息，把超过1500字符且超过6行的工具输出替换成“前3行+省略提示+后3行”，用最低成本释放上下文空间。

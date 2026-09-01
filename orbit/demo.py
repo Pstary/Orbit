@@ -76,7 +76,8 @@ def run_demo() -> int:
         workspace_root=workdir,
         permission_mode=PermissionMode.FULL_AUTO,
     ))
-    agent = harness.create_agent(llm=ScriptedLLM(_script(workdir)))
+    # demo使用脚本化离线模型，显式关闭记忆，避免任何辅助LLM调用和临时目录写入。
+    agent = harness.create_agent(llm=ScriptedLLM(_script(workdir)), memory_enabled=False)
 
     console.print(Panel.fit(f"[bold]{_TASK}[/]", title="orbit demo (offline)"))
     result = harness.run_chat(

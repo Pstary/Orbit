@@ -13,6 +13,7 @@ import concurrent.futures
 
 from .harness import OrbitHarness
 from .llm import LLM
+from .memory import MemoryManager
 from .prompt import system_prompt
 from .tools import get_default_tools
 from .tools.agent import AgentTool
@@ -27,6 +28,7 @@ class Agent:
         max_context_tokens: int = 128_000,
         max_rounds: int = 50,
         harness: OrbitHarness | None = None,
+        memory_enabled: bool = True,
     ):
         self.llm = llm
         self.tools = tools if tools is not None else get_default_tools()
@@ -37,10 +39,25 @@ class Agent:
         self.harness.attach_context(self.context)
         self.max_rounds = max_rounds
         self._system = system_prompt(self.tools)
+        # 跨会话记忆：.memory/ 目录里的持久知识。每轮对话前召回相关记忆注入system prompt，
+        # 对话结束后从对话中提取值得长期保留的用户偏好/项目事实。best-effort，失败不影响主流程。
+        self.memory = (
+            MemoryManager(
+                self.harness.workspace_root,
+                tracer=self.harness.tracer,
+                memory_dir=getattr(self.harness, "memory_dir", None),
+            )
+            if memory_enabled
+            else None
+        )
+        # 当前轮召回的记忆块，由_full_messages()拼进system消息；不写入messages历史。
+        self._memory_block = ""
         self.harness.tracer.record("agent", "agent", "agent_initialized", {
             "tool_names": [t.name for t in self.tools],
             "max_rounds": self.max_rounds,
             "max_context_tokens": max_context_tokens,
+            "model": getattr(self.llm, "model", None),
+            "memory_enabled": memory_enabled,
         })
 
         # Agent初始化时会遍历所有工具。如果某个工具是 AgentTool ，就把当前这个 Agent对象塞进工具的_parent_agent字段里。
@@ -50,7 +67,11 @@ class Agent:
                 t._parent_agent = self
 
     def _full_messages(self) -> list[dict]:
-        return [{"role": "system", "content": self._system}] + self.messages
+        # 记忆块每轮动态生成（可能新增记忆），拼在静态system prompt之后，不污染messages历史。
+        system_content = self._system
+        if self._memory_block:
+            system_content = f"{system_content}\n\n{self._memory_block}"
+        return [{"role": "system", "content": system_content}] + self.messages
 
     # 把 Agent内部的工具对象列表，转换成可以传给大模型的 tools schema列表。
     def _tool_schemas(self) -> list[dict]:
@@ -62,6 +83,8 @@ class Agent:
         self.messages.append({"role": "user", "content": user_input})
         # 在把完整历史发给模型前，先做上下文治理，避免 messages 太长导致超过模型上下文窗口。
         self.harness.compress_context_if_needed(self.context, self.messages, self.llm)
+        # 召回与本轮请求相关的持久记忆，拼进system prompt（best-effort，离线脚本模型自动跳过）。
+        self._memory_block = self._recall_memories()
 
         for round_index in range(1, self.max_rounds + 1):
             self.harness.record_round_start(round_index, self.max_rounds, len(self.messages))
@@ -73,12 +96,16 @@ class Agent:
                     on_token=on_token,
                 ),
                 round_index=round_index,
+                # 传入 llm 供 harness 记录 model 名、单次/累计 token 与费用。
+                llm=self.llm,
             )
 
             # no tool calls -> LLM is done, return text
             if not resp.tool_calls:
                 self.messages.append(resp.message)
                 self.harness.finish_chat(resp.content, reason="assistant_final")
+                # 对话结束：从本轮对话提取持久记忆（best-effort，失败静默）。
+                self._extract_memories()
                 return resp.content
 
             # tool calls -> execute (parallel when multiple, like Claude Code's
@@ -119,7 +146,34 @@ class Agent:
 
         result = "(reached maximum tool-call rounds)"
         self.harness.finish_chat(result, reason="max_rounds")
+        self._extract_memories()
         return result
+
+    def _recall_memories(self) -> str:
+        """召回相关记忆；记忆关闭或任何异常都返回空串，绝不影响主循环。"""
+        if self.memory is None:
+            return ""
+        try:
+            return self.memory.recall_block(self.messages, self.llm)
+        except Exception as exc:  # noqa: BLE001
+            self.harness.tracer.record_error("memory", "agent", "memory_recall_failed", exc)
+            return ""
+
+    def _extract_memories(self) -> None:
+        """对话结束后触发持久记忆提取；best-effort，异常静默。
+
+        触发时机（对齐 Claude Code）：本方法只在 LLM 本轮【没有 tool_calls】
+        时被调用——说明模型不再需要工具，上一个任务刚结束，正是提取持久记忆
+        的时机。提取本身是 fire-and-forget：spawn 一个后台 forked agent 异步
+        执行（独立对话、最多 5 轮、只能读文件/写记忆文件、不写主 trace），
+        不阻塞主 Agent 把回复返回给用户。
+        """
+        if self.memory is None:
+            return
+        try:
+            self.memory.extract_async(self.messages, self.llm)
+        except Exception as exc:  # noqa: BLE001
+            self.harness.tracer.record_error("memory", "agent", "memory_extract_failed", exc)
 
     def _exec_tool(self, tc) -> str:
         """Execute a single tool call, returning the result string."""
@@ -182,3 +236,5 @@ class Agent:
             "previous_message_count": len(self.messages),
         })
         self.messages.clear()
+        # 清空对话的同时重置本轮记忆块，避免旧召回内容残留到下一轮。
+        self._memory_block = ""
