@@ -218,12 +218,12 @@ def test_policy_low_risk_allowed_without_approval(tmp_path):
     assert decision.risk_action == "local_execution"
 
 
-def test_policy_medium_risk_allowed_locally_with_sandbox_advice(tmp_path):
+def test_policy_medium_risk_is_forced_to_docker(tmp_path):
     decision = _engine(tmp_path).evaluate("bash", {}, command="python -m pytest -q")
     assert decision.allowed
     assert not decision.requires_approval
     assert decision.risk_level == "MEDIUM"
-    assert "docker" in decision.reason.lower()
+    assert "forced into docker" in decision.reason.lower()
 
 
 def test_policy_medium_risk_docker_backend_reason(tmp_path):

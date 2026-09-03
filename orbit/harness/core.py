@@ -21,6 +21,7 @@ from ..tools.base import Tool
 from ..tools.runtime import path_policy, tool_deadline
 from .hooks import HookEvent, HookManager, HookResult
 from .permissions import PermissionMode, PermissionSettings, PolicyEngine
+from .risk import RiskLevel, classify_command
 from .runtime import RuntimeManager
 from .sandbox import SandboxConfig, SandboxRunner, validate_workspace_path
 from .state import HarnessState
@@ -495,7 +496,22 @@ class OrbitHarness(RuntimeManager):
             command = str(arguments["command"])
             requested_timeout = int(arguments.get("timeout", self.config.tool_timeout_seconds))
             timeout = min(requested_timeout, self.config.tool_timeout_seconds)
-            output = self.sandbox.run_bash(command, timeout, cancellation_token.get())
+            risk = classify_command(command)
+            # MEDIUM means sandbox execution, not merely a recommendation. If
+            # Docker is unavailable the command fails instead of falling back
+            # to the host, preserving the workspace security boundary.
+            selected_backend = (
+                "docker" if risk.level == RiskLevel.MEDIUM else self.sandbox.config.backend
+            )
+            self.tracer.record("sandbox", "harness.core", "bash_backend_selected", {
+                "risk_level": risk.level_name,
+                "configured_backend": self.sandbox.config.backend,
+                "selected_backend": selected_backend,
+                "forced": risk.level == RiskLevel.MEDIUM,
+            })
+            output = self.sandbox.run_bash(
+                command, timeout, cancellation_token.get(), backend=selected_backend,
+            )
             if self.sandbox.last_test_log_path is not None:
                 self.tracer.record("tool", "harness.sandbox", "test_log_saved", {
                     "tool_name": tool.name,

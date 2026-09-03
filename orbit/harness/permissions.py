@@ -206,14 +206,11 @@ class PolicyEngine:
             )
 
         if risk.level == RiskLevel.MEDIUM:
-            if self.sandbox_backend == "docker":
-                reason = f"[MEDIUM] executed in docker sandbox: {detail}"
-            else:
-                reason = (
-                    "[MEDIUM] allowed locally; docker sandbox recommended "
-                    f"(set ORBIT_SANDBOX=docker): {detail}"
-                )
-            return PermissionDecision(True, reason=reason, **fields)
+            return PermissionDecision(
+                True,
+                reason=f"[MEDIUM] forced into docker sandbox: {detail}",
+                **fields,
+            )
 
         # HIGH：系统状态修改。
         if mode == PermissionMode.FULL_AUTO:

@@ -59,12 +59,21 @@ class SandboxRunner:
         self.workspace_root = Path(workspace_root).expanduser().resolve()
         self.last_test_log_path: Path | None = None
 
-    def run_bash(self, command: str, timeout: int, cancellation=None) -> str:
-        if self.config.backend == "docker":
+    def run_bash(self, command: str, timeout: int, cancellation=None, *, backend: str | None = None) -> str:
+        selected_backend = backend
+        if selected_backend is None:
+            # Keep the invariant at the lowest shared execution boundary too,
+            # so direct SandboxRunner callers cannot accidentally run MEDIUM
+            # commands on the host by bypassing OrbitHarness.
+            from .risk import RiskLevel, classify_command
+
+            risk = classify_command(command)
+            selected_backend = "docker" if risk.level == RiskLevel.MEDIUM else self.config.backend
+        if selected_backend == "docker":
             return self._run_bash_in_docker(command, timeout, cancellation)
-        if self.config.backend == "local":
+        if selected_backend == "local":
             return self._run_bash_locally(command, timeout, cancellation)
-        raise SandboxError(f"unsupported sandbox backend: {self.config.backend}")
+        raise SandboxError(f"unsupported sandbox backend: {selected_backend}")
 
     def _run_bash_locally(self, command: str, timeout: int, cancellation=None) -> str:
         proc = subprocess.Popen(

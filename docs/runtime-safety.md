@@ -8,6 +8,8 @@
   batches of tools marked read-only run concurrently. Built-in file edits and
   writes also share a process-wide lock to prevent lost updates between agents.
 - Plan mode rejects mutations before approval and tool allowlists are considered.
+- Commands classified as MEDIUM risk always run in the Docker sandbox. If
+  Docker is unavailable, execution fails rather than falling back to the host.
 
 ## Tool deadlines
 

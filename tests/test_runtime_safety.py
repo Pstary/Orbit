@@ -201,7 +201,13 @@ def test_interrupt_keeps_results_from_earlier_tools_in_batch(tmp_path):
     assert replies == {"one": "completed", "two": "[interrupted]"}
 
 
-def test_local_bash_can_be_interrupted(tmp_path):
+def test_local_bash_can_be_interrupted(tmp_path, monkeypatch):
+    from orbit.harness.risk import RiskLevel, RiskResult
+
+    monkeypatch.setattr(
+        "orbit.harness.core.classify_command",
+        lambda command: RiskResult(RiskLevel.LOW, ["test-local-command"], command),
+    )
     harness = harness_at(tmp_path, tool_timeout_seconds=30, memory_enabled=False)
     agent = Agent(
         ScriptedLLM([LLMResponse(tool_calls=[ToolCall(
@@ -220,6 +226,51 @@ def test_local_bash_can_be_interrupted(tmp_path):
         with pytest.raises(ToolInterrupted):
             future.result(timeout=5)
     assert time.monotonic() - started_at < 5
+
+
+def test_medium_bash_is_forced_to_docker(tmp_path, monkeypatch):
+    harness = harness_at(tmp_path, memory_enabled=False)
+    seen = []
+
+    def fake_docker(command, timeout, cancellation=None):
+        seen.append((command, timeout, cancellation))
+        return "docker-result"
+
+    monkeypatch.setattr(harness.sandbox, "_run_bash_in_docker", fake_docker)
+    monkeypatch.setattr(
+        harness.sandbox,
+        "_run_bash_locally",
+        lambda *args, **kwargs: pytest.fail("MEDIUM command must not run locally"),
+    )
+    result = harness.execute_tool_call(
+        get_tool("bash"),
+        ToolCall("medium", "bash", {"command": "python -m pytest -q"}),
+    )
+    assert result == "docker-result"
+    assert seen and seen[0][0] == "python -m pytest -q"
+
+    events = [e for e in harness.tracer.events if e.action == "bash_backend_selected"]
+    assert events[-1].details == {
+        "risk_level": "MEDIUM",
+        "configured_backend": "local",
+        "selected_backend": "docker",
+        "forced": True,
+    }
+
+
+def test_direct_sandbox_runner_also_forces_medium_to_docker(tmp_path, monkeypatch):
+    harness = harness_at(tmp_path, memory_enabled=False)
+    monkeypatch.setattr(
+        harness.sandbox,
+        "_run_bash_in_docker",
+        lambda command, timeout, cancellation=None: "direct-docker-result",
+    )
+    monkeypatch.setattr(
+        harness.sandbox,
+        "_run_bash_locally",
+        lambda *args, **kwargs: pytest.fail("direct MEDIUM command must not run locally"),
+    )
+    assert harness.sandbox.run_bash("node build.js", 30) == "direct-docker-result"
 
 
 def test_mutation_batch_preserves_write_edit_read_order(tmp_path):

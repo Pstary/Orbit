@@ -6,10 +6,24 @@ from pathlib import Path
 
 from orbit.evals.swe_bench_lite import SweBenchEvalConfig, run_eval
 from orbit.harness import PermissionMode
+from orbit.harness.sandbox import SandboxRunner
 from orbit.llm import LLMResponse, ScriptedLLM, ToolCall
 
 
-def test_swe_bench_lite_runner_with_local_jsonl(tmp_path):
+def _simulate_docker(monkeypatch):
+    # MEDIUM commands are required to use Docker. Simulate the container runner
+    # with the local process implementation so this unit test is daemon-free.
+    monkeypatch.setattr(
+        SandboxRunner,
+        "_run_bash_in_docker",
+        lambda self, command, timeout, cancellation=None: self._run_bash_locally(
+            command, timeout, cancellation,
+        ),
+    )
+
+
+def test_swe_bench_lite_runner_with_local_jsonl(tmp_path, monkeypatch):
+    _simulate_docker(monkeypatch)
     source_repo = _make_repo(tmp_path / "source")
     base_commit = _git(source_repo, "rev-parse", "HEAD").stdout.strip()
     dataset_path = tmp_path / "instances.jsonl"
@@ -68,7 +82,8 @@ def test_swe_bench_lite_runner_with_local_jsonl(tmp_path):
     assert list((tmp_path / "runs" / "local__calc-1" / "test_logs").glob("test-run-*.json"))
 
 
-def test_swe_bench_lite_runner_compares_agent_and_direct_modes(tmp_path):
+def test_swe_bench_lite_runner_compares_agent_and_direct_modes(tmp_path, monkeypatch):
+    _simulate_docker(monkeypatch)
     source_repo = _make_repo(tmp_path / "source")
     base_commit = _git(source_repo, "rev-parse", "HEAD").stdout.strip()
     dataset_path = tmp_path / "instances.jsonl"

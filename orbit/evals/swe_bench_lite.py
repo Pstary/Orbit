@@ -223,7 +223,10 @@ def run_instance(
                 "command": config.post_test_command,
             })
             test_output = harness.sandbox.run_bash(config.post_test_command, config.tool_timeout_seconds)
-            passed = "[exit code:" not in test_output
+            passed = (
+                not test_output.lstrip().startswith("Error:")
+                and "[exit code:" not in test_output
+            )
             if harness.sandbox.last_test_log_path is not None:
                 harness.tracer.record("eval", "orbit.evals.swe_bench_lite", "verification_log_saved", {
                     "test_log_path": str(harness.sandbox.last_test_log_path),

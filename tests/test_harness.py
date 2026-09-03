@@ -273,14 +273,14 @@ def test_bash_test_command_writes_test_log(tmp_path):
 
     result = harness.execute_tool_call(
         bash,
-        _ToolCall(id="c1", name="bash", arguments={"command": "python -m pytest --version"}),
+        _ToolCall(id="c1", name="bash", arguments={"command": "echo pytest"}),
     )
     trace_path = harness.close()
 
     logs = list(test_log_dir.glob("test-run-*.json"))
     assert logs
     payload = json.loads(logs[0].read_text(encoding="utf-8"))
-    assert payload["command"] == "python -m pytest --version"
+    assert payload["command"] == "echo pytest"
     assert payload["returncode"] == 0
     assert "pytest" in result.lower()
 
