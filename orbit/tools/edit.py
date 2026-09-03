@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from .base import Tool
+from .runtime import check_deadline, file_mutation_lock
 
 # track files changed this session for /diff
 _changed_files: set[str] = set()
@@ -43,44 +44,46 @@ class EditFileTool(Tool):
     }
 
     def execute(self, file_path: str, old_string: str, new_string: str) -> str:
-        try:
-            p = Path(file_path).expanduser().resolve()
-            if not p.exists():
-                return f"Error: {file_path} not found"
-
+        with file_mutation_lock:
             try:
-                content = p.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                return f"Error: {file_path} is not a UTF-8 text file (edit_file only edits text files)"
-            # 检查old_string是否在文件中出现一次
-            occurrences = content.count(old_string)
+                p = Path(file_path).expanduser().resolve()
+                if not p.exists():
+                    return f"Error: {file_path} not found"
 
-            if occurrences == 0:
-                # 如果old_string不在文件中，返回错误信息
-                preview = content[:500] + ("..." if len(content) > 500 else "")
-                return (
-                    f"Error: old_string not found in {file_path}.\n"
-                    f"File starts with:\n{preview}"
-                )
-            if occurrences > 1:
-                # 如果old_string在文件中出现多次，返回错误信息  
-                return (
-                    f"Error: old_string appears {occurrences} times in {file_path}. "
-                    f"Include more surrounding lines to make it unique."
-                )
+                try:
+                    content = p.read_text(encoding="utf-8")
+                except UnicodeDecodeError:
+                    return f"Error: {file_path} is not a UTF-8 text file (edit_file only edits text files)"
+                # 检查old_string是否在文件中出现一次
+                occurrences = content.count(old_string)
 
-            new_content = content.replace(old_string, new_string, 1)
-            p.write_text(new_content, encoding="utf-8")
-            _changed_files.add(str(p))
+                if occurrences == 0:
+                    # 如果old_string不在文件中，返回错误信息
+                    preview = content[:500] + ("..." if len(content) > 500 else "")
+                    return (
+                        f"Error: old_string not found in {file_path}.\n"
+                        f"File starts with:\n{preview}"
+                    )
+                if occurrences > 1:
+                    # 如果old_string在文件中出现多次，返回错误信息
+                    return (
+                        f"Error: old_string appears {occurrences} times in {file_path}. "
+                        f"Include more surrounding lines to make it unique."
+                    )
 
-            # generate a unified diff so the user/LLM can see exactly what changed
-            # 生成一个紧凑的统一差异，显示文件内容变化的详细信息。
-            # 包括文件名、行号、旧值和新值。
-            diff = _unified_diff(content, new_content, str(p))
-            return f"Edited {file_path}\n{diff}"
-        except Exception as e:  # noqa: BLE001
-            # boundary: the agent gets an error string, not a traceback
-            return f"Error: {e}"
+                new_content = content.replace(old_string, new_string, 1)
+                check_deadline()
+                p.write_text(new_content, encoding="utf-8")
+                _changed_files.add(str(p))
+
+                # generate a unified diff so the user/LLM can see exactly what changed
+                # 生成一个紧凑的统一差异，显示文件内容变化的详细信息。
+                # 包括文件名、行号、旧值和新值。
+                diff = _unified_diff(content, new_content, str(p))
+                return f"Edited {file_path}\n{diff}"
+            except Exception as e:  # noqa: BLE001
+                # boundary: the agent gets an error string, not a traceback
+                return f"Error: {e}"
 
 
 def _unified_diff(old: str, new: str, filename: str, context: int = 3) -> str:
@@ -99,4 +102,4 @@ def _unified_diff(old: str, new: str, filename: str, context: int = 3) -> str:
     # truncate enormous diffs
     if len(result) > 3000:
         result = result[:2500] + "\n... (diff truncated)\n"
-    return result   
+    return result

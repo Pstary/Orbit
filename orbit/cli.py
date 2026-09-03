@@ -1,6 +1,7 @@
 """Interactive REPL - the user-facing terminal interface."""
 
 import argparse
+import concurrent.futures
 import os
 import sys
 from pathlib import Path
@@ -15,14 +16,35 @@ from rich.panel import Panel
 
 from . import __version__
 from .agent import Agent
+from .cancellation import ToolInterrupted
 from .config import Config, ConfigError, parse_config
 from .harness import OrbitHarness, HarnessConfig, PermissionMode
 from .llm import LLM, LiteLLM
-from .session import list_sessions, load_session, save_session
 from .skill_registry import default_skills_dir
-from .tools import get_default_tools
 
 console = Console()
+
+
+def _run_chat_interruptibly(agent: Agent, user_input: str, **callbacks) -> str:
+    """Run a turn off the UI thread so Ctrl+C can request cooperative cancellation."""
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="orbit-agent")
+    future = pool.submit(agent.harness.run_chat, agent, user_input, **callbacks)
+    interrupt_requested = False
+    try:
+        while True:
+            try:
+                return future.result(timeout=0.1)
+            except concurrent.futures.TimeoutError:
+                continue
+            except KeyboardInterrupt:
+                if interrupt_requested:
+                    raise
+                interrupt_requested = True
+                agent.harness.interrupt(agent)
+                console.print("\n[yellow]Stopping the active operation...[/yellow]")
+    finally:
+        # Do not return to the prompt while an old tool can still mutate files.
+        pool.shutdown(wait=True, cancel_futures=True)
 
 
 def _parse_args():
@@ -155,50 +177,30 @@ def main():
     except ValueError as e:
         console.print(f"[red bold]Configuration error:[/red bold] {e}")
         sys.exit(1)
-    agent = harness.create_agent(
-        llm=llm,
-        # 创建Agent前完成MCP工具发现，让远端工具和内置工具进入同一份schema。
-        tools=get_default_tools(
-            include_mcp=config.mcp_enabled,
-            mcp_config_path=config.mcp_config_file or None,
-            include_skills=config.skills_enabled,
-            skills_dir=_resolve_skills_dir(config),
-        ),
-        max_context_tokens=config.max_context_tokens,
-        max_rounds=50,
-        memory_enabled=config.memory_enabled,
-    )
-
-    # 记忆的召回/提取是隐藏的LLM调用，远程模型上可能耗时数十秒，输出进度避免终端像卡死。
-    if getattr(agent, "memory", None) is not None:
-        agent.memory.notify = lambda msg: console.print(f"[dim][memory] {msg}[/dim]")
-
-    # resume saved session
-    if args.resume:
-        loaded = load_session(args.resume)
-        if loaded:
-            agent.messages, loaded_model = loaded
-            # restore the model from the saved session unless overridden by CLI
-            if not args.model:
-                agent.llm.model = loaded_model
-                config.model = loaded_model
-            console.print(f"[green]Resumed session: {args.resume} (model: {agent.llm.model})[/green]")
-        else:
-            console.print(f"[red]Session '{args.resume}' not found.[/red]")
-            sys.exit(1)
-
-    # one-shot mode
-    if args.prompt:
-        try:
-            _run_once(agent, args.prompt)
-        finally:
-            trace_path = harness.close()
-            console.print(f"[dim]Trace saved: {trace_path}[/dim]")
-        return
-
-    # interactive REPL
     try:
-        _repl(agent, config)
+        agent = harness.create_agent(
+            llm=llm,
+            max_context_tokens=config.max_context_tokens,
+            max_rounds=50,
+            memory_enabled=config.memory_enabled,
+        )
+
+        # 记忆的召回/提取是隐藏的LLM调用，远程模型上可能耗时数十秒，输出进度避免终端像卡死。
+        harness.set_memory_notify(lambda msg: console.print(f"[dim][memory] {msg}[/dim]"))
+
+        # resume saved session
+        if args.resume:
+            if harness.resume_session(agent, args.resume, restore_model=not bool(args.model)):
+                config.model = agent.llm.model
+                console.print(f"[green]Resumed session: {args.resume} (model: {agent.llm.model})[/green]")
+            else:
+                console.print(f"[red]Session '{args.resume}' not found.[/red]")
+                sys.exit(1)
+
+        if args.prompt:
+            _run_once(agent, args.prompt)
+        else:
+            _repl(agent, config)
     finally:
         trace_path = harness.close()
         console.print(f"[dim]Trace saved: {trace_path}[/dim]")
@@ -235,6 +237,11 @@ def _build_harness(config: Config) -> OrbitHarness:
             docker_read_only_rootfs=config.docker_read_only_rootfs,
             docker_seccomp_profile=config.docker_seccomp_profile,
             memory_dir=memory_dir,
+            memory_enabled=config.memory_enabled,
+            mcp_enabled=config.mcp_enabled,
+            mcp_config_file=config.mcp_config_file or None,
+            skills_enabled=config.skills_enabled,
+            skills_dir=_resolve_skills_dir(config),
         ),
         approval_callback=approve,
     )
@@ -380,7 +387,7 @@ def _repl(agent: Agent, config: Config):
         if user_input == "/compact":
             from .context import estimate_tokens
             before = estimate_tokens(agent.messages)
-            compressed = agent.context.maybe_compress(agent.messages, agent.llm)
+            compressed = agent.harness.compact(agent)
             after = estimate_tokens(agent.messages)
             # 如果真的发生压缩，展示压缩前后token变化。
             if compressed:
@@ -391,25 +398,25 @@ def _repl(agent: Agent, config: Config):
             continue
         # 保存当前会话，后续可以通过orbit-r恢复。
         if user_input == "/save":
-            sid = save_session(agent.messages, config.model)
+            sid = agent.harness.save_session(agent)
             console.print(f"[green]Session saved: {sid}[/green]")
             console.print(f"Resume with: orbit -r {sid}")
             continue
         # 展示本次会话通过edit_file/write_file记录到的变更文件。
         if user_input == "/diff":
-            from .tools.edit import _changed_files
+            changed_files = agent.harness.changed_files()
             # 没有记录到文件变更时给出空状态提示。
-            if not _changed_files:
+            if not changed_files:
                 console.print("[dim]No files modified this session.[/dim]")
             # 有变更时按文件名排序输出。
             else:
-                console.print(f"[bold]Files modified this session ({len(_changed_files)}):[/bold]")
-                for f in sorted(_changed_files):
+                console.print(f"[bold]Files modified this session ({len(changed_files)}):[/bold]")
+                for f in changed_files:
                     console.print(f"  [cyan]{f}[/cyan]")
             continue
         # 列出最近保存的会话，方便用户选择resume目标。
         if user_input == "/sessions":
-            sessions = list_sessions()
+            sessions = agent.harness.list_sessions()
             # 没有保存过会话时给出空状态提示。
             if not sessions:
                 console.print("[dim]No saved sessions.[/dim]")
@@ -447,7 +454,7 @@ def _repl(agent: Agent, config: Config):
         # 调用Harness顶层入口处理用户输入，内部可能经历多轮LLM调用和工具调用。
         # run_chat只在内存里追加trace事件；完整trace在用户退出REPL时由harness.close()统一落盘。
         try:
-            response = agent.harness.run_chat(
+            response = _run_chat_interruptibly(
                 agent,
                 user_input,
                 on_token=on_token,
@@ -461,8 +468,10 @@ def _repl(agent: Agent, config: Config):
             else:
                 console.print(Markdown(response))
         # 当前轮被Ctrl+C中断时，不退出整个REPL，只提示中断。
-        except KeyboardInterrupt:
-            console.print("\n[yellow]Interrupted.[/yellow]")
+        except (KeyboardInterrupt, ToolInterrupted):
+            console.print(
+                "\n[yellow]Interrupted. Add instructions below to continue the same task.[/yellow]"
+            )
         # 其他异常也只打印错误，保证REPL还能继续接受下一轮输入。
         except Exception as e:  # noqa: BLE001
             console.print(f"\n[red]Error: {e}[/red]")
@@ -499,8 +508,7 @@ def _show_skills(agent: Agent) -> None:
         console.print("[dim]Skill loading is disabled.[/dim]")
         return
 
-    list_skills = getattr(tool, "list_skills", None)
-    skills = list_skills() if callable(list_skills) else []
+    skills = agent.harness.list_skills(agent)
     if not skills:
         console.print("[dim]No workspace skills found.[/dim]")
         return
@@ -513,20 +521,17 @@ def _show_skills(agent: Agent) -> None:
 
 
 def _load_skill_tool(agent: Agent):
-    for tool in agent.tools:
-        if tool.name == "load_skill":
-            return tool
-    return None
+    return agent.harness.skill_tool(agent)
 
 
 def _show_memory(agent: Agent) -> None:
     # 记忆被禁用（如--no-memory或子Agent）时给出明确提示。
-    if agent.memory is None:
+    status = agent.harness.memory_status(agent)
+    if status is None:
         console.print("[dim]Persistent memory is disabled.[/dim]")
         return
-    store = agent.memory.store
-    records = store.list_records()
-    console.print(f"Memory dir: [cyan]{store.memory_dir}[/cyan]")
+    records = status["records"]
+    console.print(f"Memory dir: [cyan]{status['directory']}[/cyan]")
     if not records:
         console.print("[dim]No memories stored yet. Durable preferences and project facts are saved here automatically.[/dim]")
         return

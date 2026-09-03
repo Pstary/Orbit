@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 
 from openai import APIConnectionError, APIError, APITimeoutError, BadRequestError, OpenAI, RateLimitError
 
+from .cancellation import check_cancellation
+
 
 @dataclass
 class ToolCall:
@@ -216,6 +218,7 @@ class LLM:
 
         # 遍历服务端流式返回的每一个chunk。
         for chunk in stream:
+            check_cancellation()
             # usage通常只在最后一个chunk里返回，用来统计token消耗。
             if chunk.usage:
                 # 有些provider会返回null字段，这里用or 0避免后面int和None相加报错。
@@ -358,6 +361,7 @@ class LiteLLM(LLM):
 
         # 遍历LiteLLM流式返回的每一个chunk。
         for chunk in stream:
+            check_cancellation()
             # 用getattr读取usage，避免不同provider返回对象没有usage字段时报错。
             usage = getattr(chunk, "usage", None)
             # 如果当前chunk带usage，就提取token统计。

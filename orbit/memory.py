@@ -613,6 +613,8 @@ class MemoryManager:
         self.tracer = tracer
         # 可选的状态回调：召回/提取这类隐藏LLM调用耗时较长，用它向终端输出进度。
         self.notify = notify
+        self._extraction_threads: list[threading.Thread] = []
+        self._extraction_threads_lock = threading.Lock()
 
     def _trace(self, event: str, details: dict[str, Any] | None = None, **kwargs) -> None:
         if self.tracer is not None:
@@ -824,7 +826,23 @@ class MemoryManager:
             name="orbit-memory-extract",
             daemon=True,  # 守护线程：主进程退出时不阻塞等待提取完成
         )
-        thread.start()
+        with self._extraction_threads_lock:
+            self._extraction_threads = [t for t in self._extraction_threads if t.is_alive()]
+            self._extraction_threads.append(thread)
+            thread.start()
+
+    def wait_for_extraction(self, timeout: float = 30.0) -> bool:
+        """Give pending memory writes a bounded grace period before CLI exit."""
+        deadline = time.monotonic() + timeout
+        with self._extraction_threads_lock:
+            threads = list(self._extraction_threads)
+        for thread in threads:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        complete = not any(thread.is_alive() for thread in threads)
+        if not complete:
+            self._notify("长期记忆提取尚未完成，退出可能丢失本轮记忆。")
+            self._trace("memory_shutdown_timeout", {"timeout_seconds": timeout}, status="warning")
+        return complete
 
     def extract(self, messages: list[dict], llm) -> int:
         """同步提取入口（测试/调试用）：在当前线程内跑完 forked 提取并返回写入条数。"""
@@ -865,7 +883,6 @@ class MemoryManager:
         重建索引、乐观锁去重）-> 纯文本收尾。
         """
         # 函数内延迟导入，避免 agent <-> memory 之间的模块循环依赖。
-        from .agent import Agent
         from .harness import OrbitHarness
         from .harness.core import HarnessConfig
         from .harness.permissions import PermissionMode
@@ -927,20 +944,20 @@ class MemoryManager:
         )
         # 受限工具集：只读文件 + 写记忆文件。write_memory_file 不进默认工具集，
         # 主 Agent 永远拿不到它。
-        forked_agent = Agent(
+        forked_agent = forked_harness.create_agent(
             llm=llm,
             tools=[ReadFileTool(), WriteMemoryFileTool(self.store)],
             max_rounds=EXTRACT_MAX_TURNS,
-            harness=forked_harness,
             memory_enabled=False,  # 提取 agent 自己不再召回/提取记忆，防止递归
         )
 
         self._notify("正在从对话中提取长期记忆…")
         # forked agent 走自己的 Agent Loop：分析对话 -> 调 write_memory_file
         # 逐条写入（工具内部完成校验/乐观锁去重/原子写/重建索引）-> 纯文本收尾。
-        forked_agent.chat(self._extraction_task_prompt(dialogue, catalog))
-        # 故意不调用 forked_harness.close()：null tracer 没有 trace 文件可保存，
-        # close() 反而会触发 save_trace 落盘。
+        try:
+            forked_harness.run_chat(forked_agent, self._extraction_task_prompt(dialogue, catalog))
+        finally:
+            forked_harness.close()
 
         after_records = self.store.list_records()
         before_files = {record["filename"] for record in existing_records}

@@ -10,7 +10,7 @@ import hashlib
 import json
 import os
 import re
-import select
+import queue
 import subprocess
 import threading
 import time
@@ -136,6 +136,8 @@ class McpStdioClient:
         self._lock = threading.Lock()
         self._stderr_tail: list[str] = []
         self._stderr_thread: threading.Thread | None = None
+        self._stdout_queue: queue.Queue = queue.Queue()
+        self._stdout_buffer = bytearray()
         self._framing = config.framing if config.framing in {"headers", "jsonl"} else "headers"
 
     def list_tools(self) -> list[McpToolSpec]:
@@ -186,6 +188,11 @@ class McpStdioClient:
                 proc.wait(timeout=1)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                proc.wait(timeout=1)
+        if proc:
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream:
+                    stream.close()
 
     def __del__(self) -> None:
         self.close()
@@ -204,11 +211,16 @@ class McpStdioClient:
             self._initialize()
         except Exception:
             if self.config.framing != "auto" or self._framing == "jsonl":
+                self.close()
                 raise
             self.close()
             self._framing = "jsonl"
             self._start_process()
-            self._initialize()
+            try:
+                self._initialize()
+            except Exception:
+                self.close()
+                raise
 
     def _start_process(self) -> None:
         env = os.environ.copy()
@@ -225,6 +237,28 @@ class McpStdioClient:
         )
         self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
         self._stderr_thread.start()
+        # One reader owns stdout. Queue waits enforce deadlines on Windows too,
+        # including incomplete lines and partial Content-Length bodies.
+        self._stdout_queue = queue.Queue()
+        self._stdout_buffer = bytearray()
+        threading.Thread(
+            target=self._pump_stdout,
+            args=(self._process.stdout, self._stdout_queue),
+            daemon=True,
+        ).start()
+
+    @staticmethod
+    def _pump_stdout(stream, output: queue.Queue) -> None:
+        try:
+            while True:
+                chunk = stream.read(4096)
+                if not chunk:
+                    break
+                output.put(chunk)
+        except (OSError, ValueError):
+            pass
+        finally:
+            output.put(None)
 
     def _initialize(self) -> None:
         # MCP连接建立后先initialize，再发送initialized通知，之后才能list/call工具。
@@ -327,34 +361,33 @@ class McpStdioClient:
         return data
 
     def _readline(self, deadline: float) -> str:
-        if not self._process or not self._process.stdout:
-            raise McpError("MCP server process is not running")
-        if os.name != "nt":
-            # macOS/Linux下用select给阻塞读加deadline，避免坏服务卡死启动。
-            remaining = max(0.0, deadline - time.monotonic())
-            readable, _, _ = select.select([self._process.stdout], [], [], remaining)
-            if not readable:
-                raise TimeoutError("MCP response timed out while reading line")
-        return self._process.stdout.readline().decode("utf-8")
+        while b"\n" not in self._stdout_buffer:
+            self._receive_stdout(deadline)
+        end = self._stdout_buffer.index(b"\n") + 1
+        line = bytes(self._stdout_buffer[:end])
+        del self._stdout_buffer[:end]
+        return line.decode("utf-8")
 
     def _read_exact(self, length: int, deadline: float) -> bytes:
-        if not self._process or not self._process.stdout:
-            raise McpError("MCP server process is not running")
-        chunks: list[bytes] = []
-        remaining_length = length
-        while remaining_length > 0:
-            if os.name != "nt":
-                # Content-Length按字节读，不能用文本read，否则中文等多字节内容会错位。
-                remaining_time = max(0.0, deadline - time.monotonic())
-                readable, _, _ = select.select([self._process.stdout], [], [], remaining_time)
-                if not readable:
-                    raise TimeoutError("MCP response timed out while reading body")
-            chunk = self._process.stdout.read(remaining_length)
-            if chunk == b"":
-                raise McpError(f"MCP server closed stdout; stderr={self._stderr_text()}")
-            chunks.append(chunk)
-            remaining_length -= len(chunk)
-        return b"".join(chunks)
+        if length < 0:
+            raise McpError("negative MCP Content-Length")
+        while len(self._stdout_buffer) < length:
+            self._receive_stdout(deadline)
+        result = bytes(self._stdout_buffer[:length])
+        del self._stdout_buffer[:length]
+        return result
+
+    def _receive_stdout(self, deadline: float) -> None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("MCP response timed out while reading stdout")
+        try:
+            chunk = self._stdout_queue.get(timeout=remaining)
+        except queue.Empty as exc:
+            raise TimeoutError("MCP response timed out while reading stdout") from exc
+        if chunk is None:
+            raise McpError(f"MCP server closed stdout; stderr={self._stderr_text()}")
+        self._stdout_buffer.extend(chunk)
 
     def _drain_stderr(self) -> None:
         # stderr只保留尾部，出错时给用户足够线索，同时避免trace膨胀。

@@ -112,6 +112,12 @@ class PolicyEngine:
             risk is not None and risk.level == RiskLevel.LOW
         )
 
+        # Plan is a hard constraint, including protected paths and allowlists.
+        if self.settings.mode == PermissionMode.PLAN and not is_read_only:
+            return PermissionDecision(
+                False, reason="plan mode blocks mutating tools", **self._risk_fields(risk),
+            )
+
         if file_path is not None:
             sensitive = self._sensitive_path_reason(file_path)
             if sensitive:

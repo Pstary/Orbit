@@ -32,7 +32,7 @@ class AgentTool(Tool):
         "required": ["task"],
     }
 
-    # set by Agent.__init__ after construction
+    # Bound by the harness when registering an agent.
     _parent_agent = None
 
     def execute(self, task: str) -> str:
@@ -40,28 +40,4 @@ class AgentTool(Tool):
         if self._parent_agent is None:
             return "Error: agent tool not initialized (no parent agent)"
 
-        # 延迟导入Agent，避免模块加载阶段出现循环依赖。
-        from ..agent import Agent
-
-        parent = self._parent_agent
-        # 创建一个独立子Agent：复用父Agent的LLM和上下文上限，但拥有自己的对话历史。
-        sub = Agent(
-            llm=parent.llm,
-            # 过滤掉agent工具，禁止子Agent继续创建子Agent导致递归失控。
-            tools=[t for t in parent.tools if t.name != "agent"],
-            max_context_tokens=parent.context.max_tokens,
-            max_rounds=20,
-            harness=parent.harness,
-            # 子Agent是一次性调研/执行上下文，不召回也不写入长期记忆，避免额外LLM调用和记忆污染。
-            memory_enabled=False,
-        )
-
-        # 子Agent失败只返回文本错误，不把异常继续抛给父Agent。
-        try:
-            result = sub.chat(task)
-            # 子Agent结果会进入父Agent上下文，过长时需要截断以控制上下文膨胀。
-            if len(result) > 5000:
-                result = result[:4500] + "\n... (sub-agent output truncated)"
-            return f"[Sub-agent completed]\n{result}"
-        except Exception as e:  # noqa: BLE001
-            return f"Sub-agent error: {e}"
+        return self._parent_agent.harness.run_subagent(self._parent_agent, task)

@@ -1,6 +1,7 @@
 """Tests for the Orbit harness layer."""
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -194,7 +195,7 @@ def test_default_mode_allows_read_only_bash_without_approval(tmp_path):
 
     result = harness.execute_tool_call(
         bash,
-        _ToolCall(id="c1", name="bash", arguments={"command": "pwd && ls"}),
+        _ToolCall(id="c1", name="bash", arguments={"command": "cd && dir" if os.name == "nt" else "pwd && ls"}),
     )
 
     assert str(tmp_path) in result

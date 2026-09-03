@@ -14,11 +14,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from ..cancellation import ToolInterrupted, cancellation_token
 from ..context import ContextManager, estimate_tokens
 from ..llm import cost_for_model
 from ..tools.base import Tool
+from ..tools.runtime import path_policy, tool_deadline
 from .hooks import HookEvent, HookManager, HookResult
 from .permissions import PermissionMode, PermissionSettings, PolicyEngine
+from .runtime import RuntimeManager
 from .sandbox import SandboxConfig, SandboxRunner, validate_workspace_path
 from .state import HarnessState
 from .trace import TraceRecorder, truncate_for_trace
@@ -45,9 +48,15 @@ class HarnessConfig:
     docker_seccomp_profile: str = ""
     # 记忆目录；None时记忆模块默认使用 workspace_root/.memory。
     memory_dir: Path | None = None
+    memory_enabled: bool = True
+    memory_shutdown_timeout_seconds: float = 30.0
+    mcp_enabled: bool = True
+    mcp_config_file: str | None = None
+    skills_enabled: bool = True
+    skills_dir: str | None = None
 
 
-class OrbitHarness:
+class OrbitHarness(RuntimeManager):
     """Runtime wrapper that coordinates Orbit execution lifecycle."""
 
     def __init__(
@@ -93,6 +102,7 @@ class OrbitHarness:
             workspace_root=self.workspace_root,
         )
         self._closed = False
+        self._init_runtime()
         self.tracer.record("startup", "harness.core", "harness_created", {
             "workspace_root": str(self.workspace_root),
             "permission_mode": self.config.permission_mode.value,
@@ -116,7 +126,7 @@ class OrbitHarness:
         return cls(HarnessConfig(permission_mode=PermissionMode.FULL_AUTO))
 
     def create_agent(self, llm, tools=None, max_context_tokens: int = 128_000, max_rounds: int = 50,
-                     memory_enabled: bool = True):
+                     memory_enabled: bool | None = None):
         from ..agent import Agent
 
         self.tracer.record("agent", "harness.core", "create_agent", {
@@ -145,6 +155,9 @@ class OrbitHarness:
         return context
 
     def run_chat(self, agent, user_input: str, on_token=None, on_tool=None, on_tool_result=None) -> str:
+        if self._closed:
+            raise RuntimeError("Harness is closed")
+        self.runtime_for(agent)
         started = time.monotonic()
         self.tracer.record("execution", "harness.core", "execution_started", {
             "input_chars": len(user_input),
@@ -153,7 +166,7 @@ class OrbitHarness:
             "state": self.state.snapshot(),
         })
         try:
-            return agent.chat(user_input, on_token=on_token, on_tool=on_tool, on_tool_result=on_tool_result)
+            return self._run_agent(agent, user_input, on_token, on_tool, on_tool_result)
         except Exception as exc:
             self.tracer.record_error("execution", "harness.core", "execution_failed", exc, {
                 "duration_ms": _elapsed_ms(started),
@@ -323,6 +336,8 @@ class OrbitHarness:
             raise
 
     def execute_tool_call(self, tool: Tool, tool_call) -> str:
+        if self._closed:
+            raise RuntimeError("Harness is closed")
         tool_name = getattr(tool_call, "name", "")
         arguments = dict(getattr(tool_call, "arguments", {}) or {})
         self.state.tool_call_count += 1
@@ -337,6 +352,16 @@ class OrbitHarness:
             self._record_tool_result(tool_name, tool_call, bind_error, status="error")
             return bind_error
 
+        # Apply defaults before checking paths (grep/glob default to the workspace).
+        bound = inspect.signature(tool.execute).bind(**arguments)
+        bound.apply_defaults()
+        for key in ("file_path", "path", "root"):
+            value = bound.arguments.get(key)
+            if isinstance(value, str):
+                path = Path(value).expanduser()
+                if not path.is_absolute():
+                    path = self.workspace_root / path
+                arguments[key] = str(path.resolve())
         normalized_path = self._resolve_tool_path(arguments)
         command = arguments.get("command") if isinstance(arguments.get("command"), str) else None
         payload = {
@@ -420,7 +445,8 @@ class OrbitHarness:
         return approved
 
     def _execute_with_retry(self, tool: Tool, arguments: dict[str, Any]) -> str:
-        attempts = max(1, self.config.max_retries + 1)
+        # Retrying an operation with side effects can duplicate a partial success.
+        attempts = max(1, self.config.max_retries + 1) if tool.read_only else 1
         last_result = ""
         for attempt in range(1, attempts + 1):
             started = time.monotonic()
@@ -443,12 +469,19 @@ class OrbitHarness:
                     "output_chars": len(result),
                 }, duration_ms=_elapsed_ms(started))
                 return result
+            except ToolInterrupted:
+                self.tracer.record("tool", "harness.core", "tool_execution_interrupted", {
+                    "tool_name": tool.name,
+                    "attempt": attempt,
+                }, status="warning")
+                raise
             except TimeoutError as exc:
                 last_result = f"Error executing {tool.name}: timed out after {self.config.tool_timeout_seconds}s"
                 self.tracer.record_error("tool", "harness.core", "tool_execution_timeout", exc, {
                     "tool_name": tool.name,
                     "attempt": attempt,
                 })
+                break
             except Exception as exc:  # noqa: BLE001
                 last_result = f"Error executing {tool.name}: {exc}"
                 self.tracer.record_error("tool", "harness.core", "tool_execution_failed", exc, {
@@ -462,7 +495,7 @@ class OrbitHarness:
             command = str(arguments["command"])
             requested_timeout = int(arguments.get("timeout", self.config.tool_timeout_seconds))
             timeout = min(requested_timeout, self.config.tool_timeout_seconds)
-            output = self.sandbox.run_bash(command, timeout)
+            output = self.sandbox.run_bash(command, timeout, cancellation_token.get())
             if self.sandbox.last_test_log_path is not None:
                 self.tracer.record("tool", "harness.sandbox", "test_log_saved", {
                     "tool_name": tool.name,
@@ -471,17 +504,33 @@ class OrbitHarness:
                 })
                 self.sandbox.last_test_log_path = None
             return output
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        future = pool.submit(tool.execute, **arguments)
-        try:
+        deadline = time.monotonic() + self.config.tool_timeout_seconds
+        active_cancellation = cancellation_token.get()
+
+        def invoke():
+            policy_token = path_policy.set(self._can_read_path)
+            deadline_token = tool_deadline.set(deadline)
+            cancellation_context = cancellation_token.set(active_cancellation)
+            try:
+                return tool.execute(**arguments)
+            finally:
+                cancellation_token.reset(cancellation_context)
+                tool_deadline.reset(deadline_token)
+                path_policy.reset(policy_token)
+
+        # Python cannot kill a running thread. Cooperative tools check their
+        # deadline before committing writes; other tools must finish before we
+        # report timeout/interruption, so no execution is left behind to mutate
+        # files after the caller has moved on. This is a soft deadline.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(invoke)
             return future.result(timeout=self.config.tool_timeout_seconds)
-        except concurrent.futures.TimeoutError as exc:
-            future.cancel()
-            pool.shutdown(wait=False, cancel_futures=True)
-            raise TimeoutError from exc
-        finally:
-            if future.done():
-                pool.shutdown(wait=False, cancel_futures=True)
+
+    def _can_read_path(self, path: Path) -> bool:
+        allowed, _, resolved = validate_workspace_path(path, self.workspace_root)
+        return allowed and self.policy.evaluate(
+            "read_file", {}, tool_read_only=True, file_path=resolved,
+        ).allowed
 
     def save_trace(self) -> Path:
         path = self.tracer.save()
@@ -497,6 +546,7 @@ class OrbitHarness:
     def close(self) -> Path:
         if not self._closed:
             self._closed = True
+            self._close_runtime()
             self.hooks.trigger(HookEvent.SHUTDOWN, {
                 "state": self.state.snapshot(),
             })
@@ -510,6 +560,14 @@ class OrbitHarness:
                 "state": self.state.snapshot(),
             })
         return self.save_trace()
+
+    def __enter__(self):
+        if self._closed:
+            raise RuntimeError("Harness is closed")
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.close()
 
     def _install_default_hooks(self) -> None:
         self.hooks.register(HookEvent.PRE_TOOL_USE, self._permission_hook)

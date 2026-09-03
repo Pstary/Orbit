@@ -1,5 +1,6 @@
 from io import StringIO
 
+import pytest
 from rich.console import Console
 
 from orbit import cli as cli_module
@@ -88,7 +89,12 @@ def test_skill_loader_skips_symlinks_outside_skills_dir(tmp_path):
     outside.write_text("# External skill\n\nDO_NOT_LOAD", encoding="utf-8")
     linked_dir = tmp_path / "skills" / "linked-skill"
     linked_dir.mkdir(parents=True)
-    (linked_dir / "SKILL.md").symlink_to(outside)
+    try:
+        (linked_dir / "SKILL.md").symlink_to(outside)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows requires symlink privileges")
+        raise
 
     registry = SkillRegistry(tmp_path / "skills")
 

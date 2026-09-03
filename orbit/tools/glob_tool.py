@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from .base import Tool
+from .runtime import can_read_path
 
 
 class GlobTool(Tool):
@@ -38,7 +39,7 @@ class GlobTool(Tool):
                 return f"Error: {path} is not a directory"
 
             # 在指定目录下按glob模式匹配文件；`**`可以递归匹配多级目录。
-            hits = list(base.glob(pattern))
+            hits = [hit for hit in base.glob(pattern) if can_read_path(hit)]
             # 按文件修改时间倒序排序，让最近变更的文件排在前面。
             hits.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
 

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from .base import Tool
+from .runtime import can_read_path
 # 在项目文件里按正则查找内容，并返回文件路径、行号和命中行。
 # skip these dirs to avoid noise
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".tox", "dist", "build"}
@@ -59,6 +60,8 @@ class GrepTool(Tool):
         scan_limit_msg = "... (5000 file scan limit reached; results may be incomplete)"
         matches = []
         for fp in files:
+            if not can_read_path(fp):
+                continue
             try:
                 # 以UTF-8读取文本；无法解码的字节会被忽略，读取失败的文件直接跳过。
                 text = fp.read_text(encoding="utf-8", errors="ignore")

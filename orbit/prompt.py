@@ -4,9 +4,9 @@ import os
 import platform
 
 
-def system_prompt(tools) -> str:
+def system_prompt(tools, workspace_root=None) -> str:
     # 读取当前运行环境,获取当前工作目录、操作系统名称、系统版本、机器架构、Python版本
-    cwd = os.getcwd()
+    cwd = str(workspace_root) if workspace_root is not None else os.getcwd()
     # 生成工具说明列表，它会遍历传进来的所有工具，把每个工具的名字和描述拼成Markdown列表。
     tool_list = "\n".join(f"- **{t.name}**: {t.description}" for t in tools)
     # 只把skills轻量目录放进系统提示词，完整SKILL.md由load_skill工具按需加载。
